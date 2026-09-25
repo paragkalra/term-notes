@@ -185,8 +185,13 @@ def clean_lines(text):
     Trims trailing padding, drops blank lines only at the start and end, and
     removes the indentation shared by every line. Blank lines and relative
     indentation inside the selection (code, stack traces, tables) are kept.
+
+    TUIs such as Claude Code often move the cursor instead of printing
+    spaces, and iTerm2 returns the skipped (empty) cells as NUL characters;
+    those, and no-break spaces, become ordinary spaces.
     """
-    lines = [line.rstrip() for line in (text or "").splitlines()]
+    text = (text or "").replace("\0", " ").replace("\u00a0", " ")
+    lines = [line.rstrip() for line in text.splitlines()]
     while lines and not lines[0]:
         lines.pop(0)
     while lines and not lines[-1]:

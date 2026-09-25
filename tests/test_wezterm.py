@@ -95,6 +95,7 @@ def test_without_last_note(wez):
     "  line\n\tline",
     "\t a\n\t b\n\t\tc",
     " \tx\n  y",
+    "It\x00depends\x00on\x00\x00\n\x00\x00is\u00a0here\x00",
     "\n  \n",
     "",
 ])

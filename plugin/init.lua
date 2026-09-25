@@ -120,9 +120,12 @@ end
 
 -- Same as the iTerm2 script's clean_lines: trim trailing padding and outer
 -- blank lines, remove shared indentation, keep internal structure.
+-- NUL characters (empty cells some terminals return for skipped columns)
+-- and no-break spaces become ordinary spaces, as in the iTerm2 script.
 function M.clean_lines(text)
   local lines = {}
-  for line in ((text or '') .. '\n'):gmatch('(.-)\r?\n') do
+  text = (text or ''):gsub('\0', ' '):gsub('\xC2\xA0', ' ')
+  for line in (text .. '\n'):gmatch('(.-)\r?\n') do
     lines[#lines + 1] = (line:gsub('%s+$', ''))
   end
   while #lines > 0 and lines[1] == '' do

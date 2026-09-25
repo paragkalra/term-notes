@@ -866,3 +866,14 @@ def test_note_and_file_name_use_the_same_title(tmp_path, monkeypatch):
     [name] = listdir(tmp_path / "notes")
     assert name.startswith("First_")
     assert "· First" in (tmp_path / "notes" / name).read_text()
+
+
+
+def test_empty_cells_and_no_break_spaces_become_spaces():
+    # What iTerm2 returned for a Claude Code line (NULs where it skipped cells).
+    text = ("It\x00depends\x00on where you are.\x00In late September\x00\x00\n"
+            "\x00\x00is\x00heading\u00a0toward the end.\x00\x00")
+    assert th.clean_lines(text) == [
+        "It depends on where you are. In late September",
+        "  is heading toward the end.",
+    ]
