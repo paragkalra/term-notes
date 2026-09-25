@@ -8,8 +8,6 @@ Built for long sessions with coding agents like Claude Code and Codex, where
 the important bits scroll away fast. It works with anything that runs in a
 terminal: shells, SSH sessions, REPLs, log tails.
 
-<!-- TODO: demo GIF -->
-
 ```markdown
 ## 2026-09-24 15:43 · ✳ Fix login bug
 
