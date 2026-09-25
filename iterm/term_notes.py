@@ -136,13 +136,7 @@ def notes_file_for(notes_dir, template, session_id, title, cwd):
               "id": short_id(session_id)}
     wanted = os.path.join(notes_dir, render_name(template, fields) + ".md")
     if "{id}" not in template:
-        if not os.path.exists(wanted):
-            # This tab may have a file from the per-tab "{title}_{id}" naming
-            # (the default before 0.2): move it to the shared name.
-            old = (find_notes_files(notes_dir, "{title}_{id}", fields["id"])
-                   or find_notes_files(notes_dir, "{title}_{id}", fields["id"][:8]))
-            if len(old) == 1:
-                return rename_no_clobber(old[0], wanted)
+        merge_legacy_files(notes_dir, wanted, fields["title"], fields["id"])
         return wanted
     existing = find_notes_files(notes_dir, template, fields["id"])
     if not existing:
@@ -158,6 +152,45 @@ def notes_file_for(notes_dir, template, session_id, title, cwd):
         log.warning("several notes files match this tab; using %s", newest)
         return newest
     return rename_no_clobber(existing[0], wanted)
+
+
+def legacy_files(notes_dir, title_slug, file_id):
+    """Files from the per-tab "{title}_{id}" naming (the default before 0.2)
+    that belong in the shared file for this title, oldest first.
+
+    That's every "<title>_<16 hex>.md" file with the same title -- after a
+    restart, tabs get new ids, so the id can't be relied on -- plus this
+    tab's own file under any title, including the older 8-character id.
+    (Other 8-character suffixes aren't matched: "report_20260925" could be
+    a real title.)
+    """
+    pattern = re.compile(re.escape(title_slug) + r"_[0-9a-f]{16}\.md")
+    found = {p for p in glob.glob(os.path.join(glob.escape(notes_dir), "*_*.md"))
+             if pattern.fullmatch(os.path.basename(p))}
+    for own_id in (file_id, file_id[:8]):
+        found.update(find_notes_files(notes_dir, "{title}_{id}", own_id))
+    return sorted(found, key=os.path.getmtime)
+
+
+def merge_legacy_files(notes_dir, wanted, title_slug, file_id):
+    """Fold legacy per-tab files into the shared file (caller holds the lock).
+
+    Each file is first renamed to a hidden name, so if anything fails midway
+    it can't be merged a second time; that hidden file is left for manual
+    recovery and reported.
+    """
+    for old in legacy_files(notes_dir, title_slug, file_id):
+        if old == wanted:
+            continue
+        merging = os.path.join(notes_dir, "." + os.path.basename(old) + ".merging")
+        if rename_no_clobber(old, merging) != merging:
+            continue
+        with open(merging, "rb") as f:
+            data = f.read()
+        if data.strip():
+            _append_note(wanted, data if data.endswith(b"\n\n") else data.rstrip(b"\n") + b"\n\n")
+        os.remove(merging)
+        log.info("merged %s into %s", old, wanted)
 
 
 def find_notes_files(notes_dir, template, file_id):

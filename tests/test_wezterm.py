@@ -867,3 +867,36 @@ def test_undo_in_a_shared_file_lets_every_pane_resave(wez, tmp_path):
     call(actions.undo, w2, p2)  # removes pane 1's note
     call(actions.save, w1, p1)  # pane 1 can save it again
     assert "> from pane one" in (tmp_path / "Shared.md").read_text()
+
+
+
+def test_lookup_is_guarded_too(wez, tmp_path):
+    # A rename during lookup runs `ln`, which yields in real WezTerm. Another
+    # action starting then must be turned away, not resolve its own path.
+    lua, plugin, _, fake = wez
+    actions = plugin.actions(settings_for(lua, plugin, tmp_path))
+    w1, p1, s1 = make_pane(lua, pane_id=1, title="First", selection="a")
+    call(actions.save, w1, p1)
+    w2, p2, s2 = make_pane(lua, pane_id=2, title="Other", selection="b")
+    fake["before"]["ln"] = lambda: call(actions.save, w2, p2)
+    s1.title, s1.selection = "Second", "c"
+    call(actions.save, w1, p1)
+    assert "Still saving the previous note; try again" in list(s2.toasts.values())
+
+
+def test_same_title_legacy_files_are_merged_after_a_restart(wez, tmp_path):
+    lua, plugin, _, _ = wez  # fresh GLOBAL: new pane ids, as after a restart
+    older = tmp_path / "Shared_aaaaaaaaaaaaaaaa.md"
+    newer = tmp_path / "Shared_bbbbbbbbbbbbbbbb.md"
+    older.write_text("## older\n\n")
+    newer.write_text("## newer")  # missing the trailing blank line
+    os.utime(older, (1_000_000, 1_000_000))
+    (tmp_path / "Other_cccccccccccccccc.md").write_text("## other\n\n")
+    (tmp_path / "Shared_20260925.md").write_text("## report\n\n")
+    actions = plugin.actions(shared_settings(lua, plugin, tmp_path))
+    window, pane, _ = make_pane(lua, title="Shared", selection="new")
+    call(actions.save, window, pane)
+    content = (tmp_path / "Shared.md").read_text()
+    assert content.startswith("## older\n\n## newer\n\n## ")
+    assert content.index("## older") < content.index("## newer") < content.index("> new")
+    assert sorted(os.listdir(tmp_path)) == ["Other_cccccccccccccccc.md", "Shared.md", "Shared_20260925.md"]

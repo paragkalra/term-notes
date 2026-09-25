@@ -339,6 +339,51 @@ local function file_exists(path)
   return false
 end
 
+-- Append `content` to `path`, writing only the new note. If the write fails
+-- the file is cut back to its original size (plain Lua can't truncate, so
+-- via dd: POSIX, and the same on macOS and Linux), or removed if it was new,
+-- so a disk-full or interrupted write never leaves half a note behind.
+local function append(path, content)
+  local existed = file_exists(path)
+  local f = io.open(path, 'a')
+  if not f then
+    return false
+  end
+  local size = f:seek('end')
+  local ok = f:write(content)
+  ok = f:close() and ok
+  if ok then
+    return true
+  end
+  -- Roll back only if nothing but our own bytes follow the original end of
+  -- file (plain Lua has no file locking), so this can never discard someone
+  -- else's append. The check re-reads the path dd will truncate.
+  local check = size and io.open(path, 'rb')
+  local tail = check and check:seek('set', size) and check:read(#content + 1) or ''
+  if check then
+    check:close()
+  end
+  if size and content:sub(1, #tail) == tail then
+    run { 'dd', 'if=/dev/null', 'of=' .. path, 'bs=1', 'seek=' .. size }
+  elseif size then
+    wezterm.log_warn('term-notes: not rolling back ' .. path .. ': it changed during the write')
+  end
+  -- Plain Lua can't create a file exclusively, so "we created it" isn't
+  -- certain: remove it only if it is still empty, which can never delete
+  -- anyone's notes.
+  if not existed then
+    local check = io.open(path, 'r')
+    local empty = check and check:seek('end') == 0
+    if check then
+      check:close()
+    end
+    if empty then
+      os.remove(path)
+    end
+  end
+  return false
+end
+
 -- Rename src to dst unless dst exists; returns the path now in use.
 -- os.rename would silently replace dst. `ln` fails if the destination
 -- exists, so link then unlink; if that isn't possible, keep the old name.
@@ -360,6 +405,73 @@ local function rename_no_clobber(src, dst)
   return dst
 end
 
+-- Files from the per-pane "{title}_{id}" naming (the default before 0.2)
+-- that belong in the shared file for this title, oldest first: every
+-- "<title>_<16 hex>.md" (after a restart, panes get new ids, so the id can't
+-- be relied on), plus this pane's own file under any title. Same rules as the
+-- iTerm2 script's legacy_files.
+local function legacy_files(notes_dir, title_slug, id)
+  local dir = M.glob_escape(notes_dir)
+  local pattern = '^' .. title_slug:gsub('[%.%-]', '%%%0') .. '_' .. string.rep('[0-9a-f]', 16) .. '%.md$'
+  local found, list = {}, {}
+  local function add(path)
+    if not found[path] then
+      found[path] = true
+      list[#list + 1] = path
+    end
+  end
+  local ok, all = pcall(wezterm.glob, dir .. '/*_*.md')
+  for _, path in ipairs(ok and all or {}) do
+    if M.basename(path):find(pattern) then
+      add(path)
+    end
+  end
+  local ok_own, own = pcall(wezterm.glob, dir .. '/*_' .. id .. '.md')
+  for _, path in ipairs(ok_own and own or {}) do
+    add(path)
+  end
+  if #list > 1 then
+    local args = { 'ls', '-tr' } -- oldest first
+    for _, path in ipairs(list) do
+      args[#args + 1] = path
+    end
+    local sorted = {}
+    for line in (run(args) or ''):gmatch('[^\n]+') do
+      sorted[#sorted + 1] = line
+    end
+    if #sorted == #list then
+      list = sorted
+    end
+  end
+  return list
+end
+
+-- Fold legacy per-pane files into the shared file (caller holds the guard).
+-- Each is first renamed to a hidden name, so if anything fails midway it
+-- can't be merged a second time; that file is left for manual recovery.
+function M.merge_legacy_files(notes_dir, wanted, title_slug, id)
+  for _, old in ipairs(legacy_files(notes_dir, title_slug, id)) do
+    local merging = notes_dir .. '/.' .. M.basename(old) .. '.merging'
+    if old ~= wanted and rename_no_clobber(old, merging) == merging then
+      local f = io.open(merging, 'rb')
+      local data = f and f:read('a') or ''
+      if f then
+        f:close()
+      end
+      if data:find('%S') and not data:find('\n\n$') then
+        data = data:gsub('\n*$', '') .. '\n\n'
+      end
+      if data:find('%S') and not append(wanted, data) then
+        wezterm.log_error('term-notes: could not merge ' .. old .. ' into ' .. wanted
+          .. '; its notes are in ' .. merging)
+      else
+        os.remove(merging)
+        wezterm.log_info('term-notes: merged ' .. old .. ' into ' .. wanted)
+      end
+    end
+  end
+end
+
 -- The pane's notes file, renamed if the tab title changed.
 -- A save passes `context` ({ title = ..., cwd = ... }) so the file name uses
 -- exactly the values it records in the note, even nil ones (they could
@@ -375,14 +487,8 @@ function M.notes_file(config, pane, context)
   local fields = { title = M.slug(title), dir = M.slug(M.basename(cwd)), id = id }
   local wanted = config.notes_dir .. '/' .. M.render_name(config.file_name, fields) .. '.md'
   if not config.file_name:find('{id}', 1, true) then
-    -- Shared by every pane with this title. This pane may have a file from
-    -- the per-pane "{title}_{id}" naming (the default before 0.2): move it.
-    if not file_exists(wanted) then
-      local ok, old = pcall(wezterm.glob, M.glob_escape(config.notes_dir) .. '/*_' .. id .. '.md')
-      if ok and #old == 1 then
-        return rename_no_clobber(old[1], wanted)
-      end
-    end
+    -- Shared by every pane with this title.
+    M.merge_legacy_files(config.notes_dir, wanted, fields.title, id)
     return wanted
   end
   local wildcard = M.render_name(config.file_name, { title = '*', dir = '*', id = id })
@@ -518,65 +624,22 @@ local function rewrite(path, content)
   return ok
 end
 
--- Append `content` to `path`, writing only the new note. If the write fails
--- the file is cut back to its original size (plain Lua can't truncate, so
--- via dd: POSIX, and the same on macOS and Linux), or removed if it was new,
--- so a disk-full or interrupted write never leaves half a note behind.
-local function append(path, content)
-  local existed = file_exists(path)
-  local f = io.open(path, 'a')
-  if not f then
-    return false
-  end
-  local size = f:seek('end')
-  local ok = f:write(content)
-  ok = f:close() and ok
-  if ok then
-    return true
-  end
-  -- Roll back only if nothing but our own bytes follow the original end of
-  -- file (plain Lua has no file locking), so this can never discard someone
-  -- else's append. The check re-reads the path dd will truncate.
-  local check = size and io.open(path, 'rb')
-  local tail = check and check:seek('set', size) and check:read(#content + 1) or ''
-  if check then
-    check:close()
-  end
-  if size and content:sub(1, #tail) == tail then
-    run { 'dd', 'if=/dev/null', 'of=' .. path, 'bs=1', 'seek=' .. size }
-  elseif size then
-    wezterm.log_warn('term-notes: not rolling back ' .. path .. ': it changed during the write')
-  end
-  -- Plain Lua can't create a file exclusively, so "we created it" isn't
-  -- certain: remove it only if it is still empty, which can never delete
-  -- anyone's notes.
-  if not existed then
-    local check = io.open(path, 'r')
-    local empty = check and check:seek('end') == 0
-    if check then
-      check:close()
-    end
-    if empty then
-      os.remove(path)
-    end
-  end
-  return false
-end
+-- True while any save, undo or notes lookup is running. Commands (cp, ln,
+-- ls, git...) yield, so without this a second action could start midway:
+-- resolve a different path during a rename or merge, or append while an
+-- undo is copying and replacing the file. The guard covers finding the file
+-- as well as changing it, and it is global because panes with the same title
+-- share files. Actions are key presses, so a second one is simply turned away.
+local busy = false
 
--- notes file path -> true while a save or undo is changing it. Keyed by
--- path, not pane, because panes with the same title share a file. rewrite
--- yields (in `cp`), and an append overlapping a copy-and-rename would lose
--- one of them, so a second one is turned away instead.
-local busy = {}
-
-local function exclusive(window, path, fn, ...)
-  if busy[path] then
+local function exclusive(window, fn, ...)
+  if busy then
     toast(window, 'Still saving the previous note; try again')
     return false
   end
-  busy[path] = true
+  busy = true
   local ok, result = pcall(fn, ...)
-  busy[path] = nil
+  busy = false
   if not ok then
     error(result)
   end
@@ -588,9 +651,9 @@ local function write_note(config, window, pane, text, from_clipboard, comment)
   local lines = M.clean_lines(text)
   -- Read once, so the note and its file name always agree.
   local title, cwd = tab_title(pane), cwd_of(pane)
-  local notes_file = M.notes_file(config, pane, { title = title, cwd = cwd })
-  return exclusive(window, notes_file, function()
+  return exclusive(window, function()
     run { 'mkdir', '-p', config.notes_dir }
+    local notes_file = M.notes_file(config, pane, { title = title, cwd = cwd })
     local ok = append(notes_file, M.format_note(lines, {
       when = os.date('%Y-%m-%d %H:%M'),
       title = title,
@@ -656,7 +719,11 @@ function M.actions(config)
   end)
 
   actions.open_notes = wezterm.action_callback(function(window, pane)
-    local notes_file = M.notes_file(config, pane)
+    -- Looking the file up can rename or merge files, so it takes the guard.
+    local notes_file = exclusive(window, M.notes_file, config, pane)
+    if not notes_file then
+      return
+    end
     if not file_exists(notes_file) then
       toast(window, 'No notes yet for this tab')
       return
@@ -706,8 +773,9 @@ function M.actions(config)
   end
 
   actions.undo = wezterm.action_callback(function(window, pane)
-    local notes_file = M.notes_file(config, pane)
-    exclusive(window, notes_file, undo, window, pane, notes_file)
+    exclusive(window, function()
+      undo(window, pane, M.notes_file(config, pane))
+    end)
   end)
 
   return actions

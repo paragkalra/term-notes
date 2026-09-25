@@ -907,13 +907,12 @@ def test_per_tab_file_is_migrated_to_the_shared_name(tmp_path, old_id):
     assert (tmp_path / "New-title.md").read_text() == "## old note\n\n## new\n\n"
 
 
-def test_existing_shared_file_is_not_overwritten_by_migration(tmp_path):
-    (tmp_path / "Old_934051cd9b3f4e91.md").write_text("mine")
+def test_migration_appends_to_an_existing_shared_file(tmp_path):
     (tmp_path / "Shared.md").write_text("## theirs\n\n")
+    (tmp_path / "Old_934051cd9b3f4e91.md").write_text("## mine\n\n")
     path = th.save_note(str(tmp_path), "{title}", SESSION, "Shared", None, "## new\n\n")
-    assert path.endswith("Shared.md")
-    assert (tmp_path / "Shared.md").read_text() == "## theirs\n\n## new\n\n"
-    assert (tmp_path / "Old_934051cd9b3f4e91.md").read_text() == "mine"
+    assert path.endswith("Shared.md") and listdir(tmp_path) == ["Shared.md"]
+    assert (tmp_path / "Shared.md").read_text() == "## theirs\n\n## mine\n\n## new\n\n"
 
 
 def test_undo_in_a_shared_file_lets_every_tab_resave(tmp_path, monkeypatch):
@@ -934,3 +933,44 @@ def test_undo_in_a_shared_file_lets_every_tab_resave(tmp_path, monkeypatch):
     asyncio.run(notes.undo(two))  # removes tab one's note (same title, same file)
     asyncio.run(notes.save(one))  # tab one can save it again
     assert "> from tab one" in (tmp_path / "notes" / "My-tab.md").read_text()
+
+
+
+def test_same_title_legacy_files_are_merged_oldest_first(tmp_path):
+    # After an iTerm2 restart the tabs have new ids, so the old files can only
+    # be matched by title.
+    older = tmp_path / "Shared_aaaaaaaaaaaaaaaa.md"
+    newer = tmp_path / "Shared_bbbbbbbbbbbbbbbb.md"
+    older.write_text("## older\n\n")
+    newer.write_text("## newer\n\n")
+    os.utime(older, (1_000_000, 1_000_000))
+    other_title = tmp_path / "Other_cccccccccccccccc.md"
+    other_title.write_text("## other\n\n")
+    looks_like_legacy = tmp_path / "Shared_20260925.md"  # a real title, not an 8-char id
+    looks_like_legacy.write_text("## report\n\n")
+
+    th.save_note(str(tmp_path), "{title}", SESSION, "Shared", None, "## new\n\n")
+    assert (tmp_path / "Shared.md").read_text() == "## older\n\n## newer\n\n## new\n\n"
+    assert sorted(listdir(tmp_path)) == ["Other_cccccccccccccccc.md", "Shared.md", "Shared_20260925.md"]
+
+
+def test_interrupted_merge_is_never_repeated(tmp_path, monkeypatch):
+    legacy = tmp_path / "Shared_aaaaaaaaaaaaaaaa.md"
+    legacy.write_text("## older\n\n")
+    real_append = th._append_note
+    calls = {"n": 0}
+
+    def fail_first(path, data):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError(28, "No space left on device")
+        real_append(path, data)
+
+    monkeypatch.setattr(th, "_append_note", fail_first)
+    with pytest.raises(OSError):
+        th.save_note(str(tmp_path), "{title}", SESSION, "Shared", None, "## new\n\n")
+    kept = tmp_path / ".Shared_aaaaaaaaaaaaaaaa.md.merging"
+    assert kept.read_text() == "## older\n\n"  # set aside, not lost
+    th.save_note(str(tmp_path), "{title}", SESSION, "Shared", None, "## new\n\n")
+    assert (tmp_path / "Shared.md").read_text() == "## new\n\n"  # not merged twice
+    assert kept.exists()

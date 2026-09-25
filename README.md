@@ -34,6 +34,10 @@ terminal: shells, SSH sessions, REPLs, log tails.
   the same file. Agents like Claude Code set the title to the current task,
   so file names describe what you were doing. Prefer one file per tab that
   follows title changes? Set `file_name = "{title}_{id}"`.
+
+  **Upgrading from 0.1**, whose default was one file per tab
+  (`Title_<id>.md`): the next time you save or open notes in a tab, older
+  files with the same title are merged into `Title.md`, oldest first.
 - **Keeps the text's shape.** Blank lines and indentation inside the
   selection are kept, so code and stack traces survive intact.
 - **Works with agent TUIs.** Claude Code, Codex and similar tools handle the
