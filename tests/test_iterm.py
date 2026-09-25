@@ -33,7 +33,7 @@ def test_slug_is_capped():
 
 def test_notes_file_created_from_title(tmp_path):
     path = th.notes_file_for(str(tmp_path), "{title}_{id}", SESSION, "✳ Claude Code", "/src/app")
-    assert os.path.basename(path) == "Claude-Code_934051cd.md"
+    assert os.path.basename(path) == "Claude-Code_934051cd9b3f4e91.md"
     assert not os.path.exists(path)  # only named, created on first note
 
 
@@ -41,7 +41,7 @@ def test_notes_file_renamed_when_title_changes(tmp_path):
     first = th.notes_file_for(str(tmp_path), "{title}_{id}", SESSION, "Claude Code", None)
     th.append_note(first, "## note\n\n")
     second = th.notes_file_for(str(tmp_path), "{title}_{id}", SESSION, "Fix login bug", None)
-    assert os.path.basename(second) == "Fix-login-bug_934051cd.md"
+    assert os.path.basename(second) == "Fix-login-bug_934051cd9b3f4e91.md"
     assert not os.path.exists(first)
     with open(second) as f:
         assert f.read() == "## note\n\n"
@@ -57,7 +57,7 @@ def test_notes_file_separate_per_tab(tmp_path):
 
 def test_notes_file_template_with_dir(tmp_path):
     path = th.notes_file_for(str(tmp_path), "{dir}-{title}_{id}", SESSION, "T", "/Users/me/my repo")
-    assert os.path.basename(path) == "my-repo-T_934051cd.md"
+    assert os.path.basename(path) == "my-repo-T_934051cd9b3f4e91.md"
 
 
 def test_notes_dir_with_glob_characters(tmp_path):
@@ -303,7 +303,7 @@ def test_clipboard_can_be_retried_after_failed_save(tmp_path, monkeypatch):
     asyncio.run(notes.save(session))  # retry works: not treated as already saved
     asyncio.run(notes.save(session))  # same clipboard again: skipped
     [name] = os.listdir(tmp_path / "notes")
-    assert name == "My-tab_934051cd.md"
+    assert name == "My-tab_934051cd9b3f4e91.md"
     assert (tmp_path / "notes" / name).read_text().count("> copied by the app") == 1
 
 
@@ -374,6 +374,9 @@ def test_clean_lines_mixed_indentation(text, expected):
     ("{title!r}_{id}", "{title!r}"),
     ("{{title}}_{id}", "unmatched"),
     ("[term]-{title}_{id}", "* ? [ or ]"),
+    ("archive/{title}_{id}", "/ or \\"),
+    ("../{title}_{id}", "/ or \\"),
+    ("..\\{title}_{id}", "/ or \\"),
 ])
 def test_bad_file_name_template_is_rejected(tmp_path, template, message):
     with pytest.raises(ValueError, match=re.escape(message)):
@@ -401,8 +404,8 @@ def test_rename_never_replaces_an_existing_file(tmp_path):
 
 
 def test_ambiguous_matches_are_not_renamed(tmp_path):
-    older = tmp_path / "Old-title_934051cd.md"
-    newer = tmp_path / "Other-title_934051cd.md"
+    older = tmp_path / "Old-title_934051cd9b3f4e91.md"
+    newer = tmp_path / "Other-title_934051cd9b3f4e91.md"
     older.write_text("a")
     newer.write_text("b")
     os.utime(older, (1_000_000, 1_000_000))
@@ -470,3 +473,53 @@ def test_forget_keeps_a_lock_that_is_in_use():
             assert SESSION in notes.locks
 
     asyncio.run(scenario())
+
+
+
+def test_session_ids_keep_64_bits():
+    assert th.short_id(SESSION) == "934051cd9b3f4e91"
+    # Differ only after the first 32 bits: still separate files.
+    assert th.short_id("934051CD-0000-0000-0000-000000000000") != th.short_id(SESSION)
+
+
+def test_session_closed_during_save_is_purged_afterwards(tmp_path, monkeypatch):
+    release = None
+
+    async def fake_run(*args, timeout=2):
+        if args[0] == "/usr/bin/pbpaste":
+            return "copied\n"
+        await release.wait()  # the git lookup is still running...
+        return None
+
+    config = th.load_config(str(tmp_path / "missing.toml"))
+    config["notes_dir"] = str(tmp_path / "notes")
+    monkeypatch.setattr(th, "run", fake_run)
+    monkeypatch.setattr(th, "load_config", lambda: config)
+    notes = th.NoteTaker(connection=None)
+
+    async def scenario():
+        nonlocal release
+        release = asyncio.Event()
+        save = asyncio.create_task(notes.save(FakeSession(str(tmp_path))))
+        while not (SESSION in notes.locks and notes.locks[SESSION].locked()):
+            await asyncio.sleep(0)
+        notes.forget(SESSION)  # ...when the session closes
+        release.set()
+        await save
+
+    asyncio.run(scenario())
+    assert os.listdir(tmp_path / "notes")  # the in-flight save still finished
+    assert SESSION not in notes.last_clipboard
+    assert SESSION not in notes.locks
+    assert not notes.closed
+
+
+def test_conflicting_shortcuts_are_all_disabled(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('[keys]\nsave = "alt+ctrl+z"\n')  # same as undo's ctrl+alt+z
+    bindings, errors = th.load_bindings(lambda: th.load_config(str(path)))
+    names = {name for name, _ in bindings.values()}
+    assert "save" not in names and "undo" not in names
+    assert names == {"save_with_comment", "open_notes"}
+    [error] = errors
+    assert "save (alt+ctrl+z)" in error and "undo (ctrl+alt+z)" in error

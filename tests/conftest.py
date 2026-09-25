@@ -45,6 +45,7 @@ def load_wezterm_plugin(home="/Users/me"):
             home_dir = home,
             target_triple = 'aarch64-apple-darwin',
             errors = {},
+            closed_panes = {},
             GLOBAL = {},
             logs = {},
             run_child_process = run_child_process,
@@ -57,6 +58,10 @@ def load_wezterm_plugin(home="/Users/me"):
           function stub.log_info(msg) table.insert(stub.logs, msg) end
           function stub.log_error(msg) table.insert(stub.errors, msg) end
           function stub.log_warn(msg) table.insert(stub.logs, msg) end
+          stub.mux = { get_pane = function(id)
+            if stub.closed_panes[id] then return nil end
+            return {}
+          end }
           function stub.open_with(path) stub.opened = path end
           package.loaded.wezterm = stub
           return stub

@@ -439,7 +439,7 @@ def test_ambiguous_matches_are_not_renamed(wez, tmp_path):
 BAD_TEMPLATES = [
     "{titel}_{id}", "{title}_{0}", "{title", "title}", "{title:>10}_{id}",
     "{title!r}_{id}", "{{title}}_{id}", "[term]-{title}_{id}", "a*{title}_{id}",
-    "{title}?_{id}",
+    "{title}?_{id}", "archive/{title}_{id}", "../{title}_{id}", "..\\{title}_{id}",
 ]
 GOOD_TEMPLATES = ["{title}", "{dir}-{title}-{id}", "notes.{id}", "{id}"]
 
@@ -473,3 +473,58 @@ def test_notes_dir_with_glob_characters(wez, tmp_path):
     [name] = os.listdir(notes)  # renamed, not a second file
     assert name.startswith("Second_")
     assert (notes / name).read_text().count("## ") == 2
+
+
+
+def test_pane_ids_are_64_bit(wez, tmp_path):
+    lua, plugin, _, _ = wez
+    actions = plugin.actions(settings_for(lua, plugin, tmp_path))
+    names = set()
+    for pane_id in range(1, 6):
+        window, pane, _ = make_pane(lua, pane_id=pane_id, title="Same", selection="x")
+        call(actions.save, window, pane)
+    for name in os.listdir(tmp_path):
+        suffix = name.removesuffix(".md").split("_")[-1]
+        assert len(suffix) == 16 and int(suffix, 16) >= 0
+        names.add(suffix)
+    assert len(names) == 5
+
+
+def test_parse_key_is_canonical(wez):
+    _, plugin, _, _ = wez
+    a, b = plugin.parse_key("alt+ctrl+h"), plugin.parse_key("ctrl+alt+alt+h")
+    assert (a.key, a.mods) == (b.key, b.mods) == ("h", "CTRL|ALT")
+
+
+def test_conflicting_shortcuts_are_all_disabled(wez):
+    lua, plugin, stub, _ = wez
+    config = lua.eval("{}")
+    plugin.apply_to_config(config, lua.eval("{ keys = { save = 'alt+ctrl+z' } }"))
+    keys = {(k.key, k.mods) for k in config["keys"].values()}
+    assert keys == {("h", "CTRL|ALT|SHIFT"), ("n", "CTRL|ALT")}  # save and undo both off
+    [error] = stub.errors.values()
+    assert "save (alt+ctrl+z)" in error and "undo (ctrl+alt+z)" in error
+
+
+def test_clipboard_state_is_a_digest_and_closed_panes_are_forgotten(wez, tmp_path):
+    lua, plugin, stub, fake = wez
+    actions = plugin.actions(settings_for(lua, plugin, tmp_path))
+    w1, p1, _ = make_pane(lua, pane_id=1, selection="")
+    fake["clipboard"] = "a large selection"
+    call(actions.save, w1, p1)
+    stored = plugin._state.last_clipboard["1"]
+    assert stored == plugin.digest("a large selection") and not isinstance(stored, str)
+    assert stub.GLOBAL.term_notes_ids["1"]
+
+    stub.closed_panes[1] = True  # pane 1 closes
+    w2, p2, _ = make_pane(lua, pane_id=2, selection="from pane two")
+    call(actions.save, w2, p2)  # the next save cleans up
+    assert plugin._state.last_clipboard["1"] is None
+    assert stub.GLOBAL.term_notes_ids["1"] is None
+    assert stub.GLOBAL.term_notes_ids["2"]
+
+
+def test_digest_distinguishes_texts(wez):
+    _, plugin, _, _ = wez
+    values = {plugin.digest(t) for t in ["", "a", "b", "ab", "ba", "a large selection"]}
+    assert len(values) == 6

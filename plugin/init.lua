@@ -73,6 +73,10 @@ function M.check_file_name(template)
   if literal:find('[%*%?%[%]]') then
     error("term-notes: file_name " .. template .. " can't contain * ? [ or ]", 0)
   end
+  -- Keeps every notes file directly inside notes_dir (no "../").
+  if literal:find('[/\\]') then
+    error("term-notes: file_name " .. template .. " can't contain / or \\", 0)
+  end
   if not template:find('{id}', 1, true) then
     template = template .. '_{id}'
   end
@@ -248,7 +252,17 @@ function M.parse_key(spec)
     end
     mods[#mods + 1] = names[m]
   end
-  return { key = key, mods = table.concat(mods, '|') }
+  -- Canonical order, so "alt+ctrl+h" and "ctrl+alt+h" compare equal.
+  local order = { CTRL = 1, ALT = 2, SHIFT = 3, SUPER = 4 }
+  local seen, unique = {}, {}
+  for _, m in ipairs(mods) do
+    if not seen[m] then
+      seen[m] = true
+      unique[#unique + 1] = m
+    end
+  end
+  table.sort(unique, function(a, b) return order[a] < order[b] end)
+  return { key = key, mods = table.concat(unique, '|') }
 end
 
 -- ---------------------------------------------------------------------------
@@ -292,14 +306,15 @@ local function git_context(cwd)
   return { M.basename(toplevel:match('^%s*(.-)%s*$')), branch ~= '' and branch or 'detached' }
 end
 
--- WezTerm pane ids restart from 0 with WezTerm, so give each pane a random id
--- (kept across config reloads) to keep its notes file separate.
+-- WezTerm pane ids restart from 0 with WezTerm, so give each pane a random
+-- 64-bit id (kept across config reloads) to keep its notes file separate.
+-- math.random(0) returns an integer with all 64 bits random.
 local function pane_key(pane)
   wezterm.GLOBAL.term_notes_ids = wezterm.GLOBAL.term_notes_ids or {}
   local ids = wezterm.GLOBAL.term_notes_ids
   local key = tostring(pane:pane_id())
   if not ids[key] then
-    ids[key] = string.format('%08x', math.random(0, 0x7fffffff))
+    ids[key] = string.format('%016x', math.random(0))
   end
   return ids[key]
 end
@@ -356,11 +371,67 @@ function M.notes_file(config, pane)
   return wanted
 end
 
+-- 64-bit FNV-1a, so per-pane state holds a number instead of a whole
+-- selection. (Lua integers wrap on overflow, which FNV relies on.)
+function M.digest(text)
+  local h = -3750763034362895579 -- 0xcbf29ce484222325
+  for i = 1, #text do
+    h = (h ~ text:byte(i)) * 1099511628211
+  end
+  return h
+end
+
+-- pane id -> digest of the last clipboard text saved from it.
 local last_clipboard = {}
--- Clipboard text being saved right now (possibly waiting on the comment
--- prompt). run_child_process yields, so a second key press can run while a
--- save is in progress; this stops it from saving the same text again.
+-- pane id -> digest of clipboard text being saved right now (possibly
+-- waiting on the comment prompt). run_child_process yields, so a second key
+-- press can run while a save is in progress; this stops it from saving the
+-- same text again.
 local pending_clipboard = {}
+
+-- Drop state for panes that have closed. WezTerm has no pane-closed event,
+-- so this runs on each save.
+local function forget_closed_panes()
+  local get_pane = wezterm.mux and wezterm.mux.get_pane
+  if not get_pane then
+    return
+  end
+  local function alive(id)
+    local ok, pane = pcall(get_pane, tonumber(id))
+    return ok and pane ~= nil
+  end
+  for _, state in ipairs { last_clipboard, pending_clipboard } do
+    local closed = {}
+    for id in pairs(state) do
+      if not alive(id) then
+        closed[#closed + 1] = id
+      end
+    end
+    for _, id in ipairs(closed) do
+      state[id] = nil
+    end
+  end
+  local ids = wezterm.GLOBAL.term_notes_ids
+  local ok, iter, t, init = pcall(pairs, ids or {})
+  if ok and ids then
+    local closed = {}
+    for id in iter, t, init do
+      if not alive(id) then
+        closed[#closed + 1] = id
+      end
+    end
+    for _, id in ipairs(closed) do
+      ids[id] = nil
+    end
+  end
+end
+
+local function pane_id(pane)
+  return tostring(pane:pane_id())
+end
+
+-- For tests.
+M._state = { last_clipboard = last_clipboard, pending_clipboard = pending_clipboard }
 
 -- Returns text, from_clipboard.
 local function selected_text(window, pane)
@@ -371,17 +442,20 @@ local function selected_text(window, pane)
   -- Apps with their own mouse handling (Claude Code, Codex, ...) copy their
   -- selection to the clipboard instead of making a terminal selection.
   text = read_clipboard()
-  local key = pane_key(pane)
-  if not text or text == last_clipboard[key] or text == pending_clipboard[key] then
+  if not text then
     return nil, false
   end
-  pending_clipboard[key] = text
+  local id, hash = pane_id(pane), M.digest(text)
+  if hash == last_clipboard[id] or hash == pending_clipboard[id] then
+    return nil, false
+  end
+  pending_clipboard[id] = hash
   return text, true
 end
 
 local function release(pane, from_clipboard)
   if from_clipboard then
-    pending_clipboard[pane_key(pane)] = nil
+    pending_clipboard[pane_id(pane)] = nil
   end
 end
 
@@ -411,8 +485,9 @@ local function write_note(config, window, pane, text, from_clipboard, comment)
   end
   -- Only now that the note is on disk, so a failed save can be retried.
   if from_clipboard then
-    last_clipboard[pane_key(pane)] = text
+    last_clipboard[pane_id(pane)] = M.digest(text)
   end
+  forget_closed_panes()
   wezterm.log_info('term-notes: saved ' .. #lines .. ' line(s) to ' .. notes_file)
   return true
 end
@@ -505,7 +580,7 @@ function M.actions(config)
     else
       os.remove(notes_file)
     end
-    last_clipboard[pane_key(pane)] = nil
+    last_clipboard[pane_id(pane)] = nil
     toast(window, 'Removed last note')
   end)
 
@@ -522,11 +597,33 @@ function M.apply_to_config(config, opts)
   end
   local settings = M.settings(opts)
   local actions = M.actions(settings)
+  local by_key, order = {}, {}
   for name, spec in pairs(settings.keys) do
     if spec and actions[name] then
       local binding = M.parse_key(spec)
-      binding.action = actions[name]
-      table.insert(config.keys, binding)
+      local id = binding.mods .. '+' .. binding.key
+      if not by_key[id] then
+        by_key[id] = {}
+        order[#order + 1] = id
+      end
+      table.insert(by_key[id], { name = name, spec = spec, binding = binding })
+    end
+  end
+  table.sort(order)
+  for _, id in ipairs(order) do
+    local uses = by_key[id]
+    if #uses > 1 then
+      -- Don't leave precedence to WezTerm: disable all of them.
+      local names = {}
+      for i, use in ipairs(uses) do
+        names[i] = use.name .. ' (' .. use.spec .. ')'
+      end
+      table.sort(names)
+      wezterm.log_error('term-notes: ' .. table.concat(names, ' and ')
+        .. ' use the same shortcut, so they are disabled')
+    else
+      uses[1].binding.action = actions[uses[1].name]
+      table.insert(config.keys, uses[1].binding)
     end
   end
   return config

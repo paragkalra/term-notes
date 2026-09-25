@@ -99,6 +99,9 @@ def check_file_name(template):
         raise ValueError(f"config: file_name {template!r} has an unmatched {{ or }}")
     if re.search(r"[*?\[\]]", literal):
         raise ValueError(f"config: file_name {template!r} can't contain * ? [ or ]")
+    if re.search(r"[/\\]", literal):
+        # Keeps every notes file directly inside notes_dir (no "../").
+        raise ValueError(f"config: file_name {template!r} can't contain / or \\")
     if "{id}" not in template:
         template += "_{id}"
     return template
@@ -115,7 +118,9 @@ def slug(text):
 
 
 def short_id(session_id):
-    return session_id.split("-")[0].lower()
+    # 64 bits of the session UUID: collisions stay negligible even across
+    # years of accumulated notes files (32 bits would not).
+    return session_id.replace("-", "").lower()[:16]
 
 
 def notes_file_for(notes_dir, template, session_id, title, cwd):
@@ -327,15 +332,23 @@ def load_bindings(load=None):
     except Exception as e:
         errors.append(str(e) or repr(e))
         keys = DEFAULTS["keys"]
-    bindings = {}
+    by_key = collections.defaultdict(list)
     for name, spec in keys.items():
         if name not in NoteTaker.ACTIONS:
             errors.append(f"config: unknown key binding {name!r}")
         elif spec:
             try:
-                bindings[parse_key(spec)] = (name, spec)
+                by_key[parse_key(spec)].append((name, spec))
             except ValueError as e:
                 errors.append(f"config: {e}")
+    bindings = {}
+    for key, uses in by_key.items():
+        if len(uses) > 1:
+            # Don't guess which one wins: disable all of them.
+            errors.append("config: " + " and ".join(f"{n} ({s})" for n, s in uses)
+                          + " use the same shortcut, so they are disabled")
+        else:
+            bindings[key] = uses[0]
     return bindings, errors
 
 
@@ -352,13 +365,34 @@ class NoteTaker:
         # and undos in a tab run one at a time, so two quick presses can't
         # both pass the clipboard check before either has saved.
         self.locks = collections.defaultdict(asyncio.Lock)
+        # Sessions that closed while one of their actions was running.
+        self.closed = set()
 
     def forget(self, session_id):
-        """Drop per-session state once the session has closed."""
-        self.last_clipboard.pop(session_id, None)
+        """Drop per-session state once the session has closed.
+
+        If a save or undo is still running for it, that action purges the
+        state when it finishes (it could otherwise re-add it afterwards).
+        """
         lock = self.locks.get(session_id)
-        if lock is not None and not lock.locked():
-            del self.locks[session_id]
+        if lock is not None and lock.locked():
+            self.closed.add(session_id)
+        else:
+            self.purge(session_id)
+
+    def purge(self, session_id):
+        self.last_clipboard.pop(session_id, None)
+        self.locks.pop(session_id, None)
+        self.closed.discard(session_id)
+
+    async def exclusive(self, session_id, action):
+        """Run action while holding the session's lock."""
+        try:
+            async with self.locks[session_id]:
+                await action()
+        finally:
+            if session_id in self.closed:
+                self.purge(session_id)
 
     async def perform(self, name, session):
         """Run an action, showing an alert if it fails.
@@ -407,8 +441,7 @@ class NoteTaker:
                               session.session_id, title, cwd)
 
     async def save(self, session, ask_comment=False):
-        async with self.locks[session.session_id]:
-            await self._save(session, ask_comment)
+        await self.exclusive(session.session_id, lambda: self._save(session, ask_comment))
 
     async def _save(self, session, ask_comment):
         config = load_config()
@@ -441,8 +474,7 @@ class NoteTaker:
         log.info("saved %d line(s) to %s", len(lines), notes_file)
 
     async def undo(self, session):
-        async with self.locks[session.session_id]:
-            await self._undo(session)
+        await self.exclusive(session.session_id, lambda: self._undo(session))
 
     async def _undo(self, session):
         config = load_config()
