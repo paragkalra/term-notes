@@ -764,3 +764,23 @@ def test_failed_rename_cleanup_is_reported(wez, tmp_path):
     state.title, state.selection = "Second", "b"
     call(actions.save, window, pane)
     assert any("both names now exist" in msg for msg in stub.errors.values())
+
+
+
+def test_note_and_file_name_use_the_same_title(wez, tmp_path):
+    lua, plugin, _, _ = wez
+    actions = plugin.actions(settings_for(lua, plugin, tmp_path))
+    window, pane, _ = make_pane(lua, selection="x")
+    # The title changes after it is first read, e.g. while mkdir/git run.
+    pane.tab = lua.eval("""
+        function()
+          local titles = { 'First', 'Second', 'Third' }
+          local i = 0
+          local tab = { get_title = function() i = i + 1; return titles[math.min(i, 3)] end }
+          return function() return tab end
+        end
+    """)()
+    call(actions.save, window, pane)
+    [name] = os.listdir(tmp_path)
+    assert name.startswith("First_")
+    assert "· First" in (tmp_path / name).read_text()

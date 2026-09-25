@@ -338,10 +338,13 @@ local function file_exists(path)
 end
 
 -- The pane's notes file, renamed if the tab title changed.
-function M.notes_file(config, pane)
+-- title and cwd can be passed in so a save uses the values it records in
+-- the note (they could change while it runs git).
+function M.notes_file(config, pane, title, cwd)
   local id = pane_key(pane)
-  local cwd = cwd_of(pane)
-  local fields = { title = M.slug(tab_title(pane)), dir = M.slug(M.basename(cwd)), id = id }
+  title = title or tab_title(pane)
+  cwd = cwd or cwd_of(pane)
+  local fields = { title = M.slug(title), dir = M.slug(M.basename(cwd)), id = id }
   local wanted = config.notes_dir .. '/' .. M.render_name(config.file_name, fields) .. '.md'
   local wildcard = M.render_name(config.file_name, { title = '*', dir = '*', id = id })
   local ok, existing = pcall(wezterm.glob, M.glob_escape(config.notes_dir) .. '/' .. wildcard .. '.md')
@@ -561,12 +564,13 @@ end
 -- Appends the note; returns true on success.
 local function write_note(config, window, pane, text, from_clipboard, comment)
   local lines = M.clean_lines(text)
-  local cwd = cwd_of(pane)
-  local notes_file = M.notes_file(config, pane)
+  -- Read once, so the note and its file name always agree.
+  local title, cwd = tab_title(pane), cwd_of(pane)
+  local notes_file = M.notes_file(config, pane, title, cwd)
   run { 'mkdir', '-p', config.notes_dir }
   local ok = append(notes_file, M.format_note(lines, {
     when = os.date('%Y-%m-%d %H:%M'),
-    title = tab_title(pane),
+    title = title,
     cwd = cwd,
     home = wezterm.home_dir,
     git = config.git_context and git_context(cwd) or nil,
