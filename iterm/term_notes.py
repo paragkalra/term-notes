@@ -225,8 +225,15 @@ def append_note(notes_file, note):
     """Append a note; on failure the file is cut back to its original size,
     so a disk-full or interrupted write never leaves half a note behind."""
     os.makedirs(os.path.dirname(notes_file), exist_ok=True)
-    existed = os.path.exists(notes_file)
-    with open(notes_file, "ab") as f:
+    # O_EXCL tells us atomically whether this call created the file, so the
+    # cleanup below can never delete a file someone else just created.
+    try:
+        fd = os.open(notes_file, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_EXCL, 0o666)
+        created = True
+    except FileExistsError:
+        fd = os.open(notes_file, os.O_WRONLY | os.O_APPEND)
+        created = False
+    with os.fdopen(fd, "ab") as f:
         size = f.seek(0, os.SEEK_END)
         try:
             f.write(note.encode("utf-8"))
@@ -235,7 +242,7 @@ def append_note(notes_file, note):
         except BaseException:
             with contextlib.suppress(OSError):
                 f.truncate(size)
-                if not existed:  # don't leave an empty file behind
+                if created:  # don't leave an empty file behind
                     os.remove(notes_file)
             raise
 
@@ -515,7 +522,8 @@ class NoteTaker:
             await self.alert(session, "No notes yet", "Select some text in this tab and save it first.")
             return
         if config["open_in"] == "app":
-            await run("/usr/bin/open", notes_file)
+            if await run("/usr/bin/open", notes_file) is None:
+                raise RuntimeError(f"couldn't open {notes_file} with /usr/bin/open")
             return
         pane = await session.async_split_pane(vertical=True)
         quoted = "'" + notes_file.replace("'", "'\\''") + "'"

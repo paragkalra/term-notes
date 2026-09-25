@@ -370,7 +370,13 @@ function M.notes_file(config, pane)
   if not run { 'ln', existing[1], wanted } then
     return existing[1]
   end
-  os.remove(existing[1])
+  if not os.remove(existing[1]) then
+    -- Both names would remain and make later lookups ambiguous: undo the
+    -- link and keep the old name.
+    os.remove(wanted)
+    wezterm.log_warn('term-notes: could not rename ' .. existing[1] .. '; keeping its name')
+    return existing[1]
+  end
   return wanted
 end
 
@@ -499,10 +505,21 @@ local function append(path, content)
   if ok then
     return true
   end
-  if not existed then
-    os.remove(path)
-  elseif size then
+  if size then
     run { 'dd', 'if=/dev/null', 'of=' .. path, 'bs=1', 'seek=' .. size }
+  end
+  -- Plain Lua can't create a file exclusively, so "we created it" isn't
+  -- certain: remove it only if it is still empty, which can never delete
+  -- anyone's notes.
+  if not existed then
+    local check = io.open(path, 'r')
+    local empty = check and check:seek('end') == 0
+    if check then
+      check:close()
+    end
+    if empty then
+      os.remove(path)
+    end
   end
   return false
 end

@@ -95,9 +95,10 @@ return config
 The WezTerm plugin has the same shortcuts and writes the same notes format.
 Comments are entered with WezTerm's input prompt.
 
-**macOS and Linux only.** The plugin uses `mkdir`, `cp`, `less` and a
-clipboard tool (`pbpaste` on macOS; `wl-paste` or `xclip` on Linux). On
-Windows it logs an error and adds no shortcuts.
+**macOS and Linux only.** The plugin runs standard POSIX tools: `mkdir`,
+`cp`, `ln`, `ls`, `dd` (with `/dev/null`), `git` for git context, `less` for the
+default viewer, and a clipboard tool (`pbpaste` on macOS; `wl-paste` or
+`xclip` on Linux). On Windows it logs an error and adds no shortcuts.
 
 ## Configuration
 

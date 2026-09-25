@@ -649,3 +649,67 @@ def test_rename_keeps_old_name_when_no_safe_rename(wez, tmp_path):
     call(actions.save, window, pane)
     assert os.listdir(tmp_path) == [first]  # kept the old name, didn't overwrite
     assert (tmp_path / first).read_text().count("## ") == 2
+
+
+
+def test_failed_append_never_deletes_a_file_someone_else_created(wez, tmp_path):
+    lua, plugin, _, _ = wez
+    actions = plugin.actions(settings_for(lua, plugin, tmp_path))
+    # Another process creates the file right after the existence check, then
+    # our write fails.
+    lua.execute("""
+        local real_open = io.open
+        io.open = function(path, mode)
+          if mode == 'a' then
+            local other = real_open(path, 'w')
+            other:write("another process's notes\\n")
+            other:close()
+            local f = real_open(path, mode)
+            return {
+              seek = function(_, ...) return f:seek(...) end,
+              write = function() return nil, 'No space left on device' end,
+              close = function() return f:close() end,
+            }
+          end
+          return real_open(path, mode)
+        end
+    """)
+    window, pane, _ = make_pane(lua, selection="mine")
+    call(actions.save, window, pane)
+    [name] = os.listdir(tmp_path)
+    assert (tmp_path / name).read_text() == "another process's notes\n"
+
+
+def test_rename_rolls_back_when_old_name_cannot_be_removed(wez, tmp_path):
+    lua, plugin, stub, _ = wez
+    actions = plugin.actions(settings_for(lua, plugin, tmp_path))
+    window, pane, state = make_pane(lua, title="First", selection="a")
+    call(actions.save, window, pane)
+    [first] = os.listdir(tmp_path)
+    lua.execute("""
+        local real_remove = os.remove
+        os.remove = function(path)
+          if path:find('/First_', 1, true) then return nil, 'Operation not permitted' end
+          return real_remove(path)
+        end
+    """)
+    state.title, state.selection = "Second", "b"
+    call(actions.save, window, pane)
+    assert os.listdir(tmp_path) == [first]  # no second name left behind
+    assert (tmp_path / first).read_text().count("## ") == 2
+    assert any("could not rename" in msg for msg in stub.logs.values())
+
+
+def test_readme_lists_every_command_the_plugin_runs():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "plugin", "init.lua")) as f:
+        source = f.read()
+    # run { 'cmd', ... } calls, and argument tables built up before run(args).
+    commands = set(re.findall(r"run \{ '([\w-]+)'", source))
+    commands |= set(re.findall(r"local args = \{ '([\w-]+)'", source))
+    with open(os.path.join(root, "README.md")) as f:
+        readme = f.read()
+    assert {"mkdir", "cp", "ln", "ls", "dd", "git", "pbpaste"} <= commands
+    for command in commands:
+        assert f"`{command}`" in readme, command
+    assert "/dev/null" in readme

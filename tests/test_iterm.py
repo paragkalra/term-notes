@@ -626,3 +626,40 @@ def test_failed_first_append_leaves_no_file(tmp_path, monkeypatch):
     with pytest.raises(OSError):
         th.append_note(str(path), th.format_note(["first"], when=WHEN))
     assert not path.exists()
+
+
+
+def test_failed_append_never_deletes_a_file_someone_else_created(tmp_path, monkeypatch):
+    path = tmp_path / "n.md"
+    path.write_text("another process's notes\n")
+    # As if the file appeared between an existence check and the open.
+    monkeypatch.setattr(th.os.path, "exists", lambda p: False)
+
+    def disk_full(fd):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(th.os, "fsync", disk_full)
+    with pytest.raises(OSError):
+        th.append_note(str(path), th.format_note(["mine"], when=WHEN))
+    assert path.read_text() == "another process's notes\n"
+
+
+def test_open_in_app_failure_shows_an_alert(tmp_path, monkeypatch):
+    async def fake_run(*args, timeout=2):
+        return None  # /usr/bin/open failed
+
+    config = th.load_config(str(tmp_path / "missing.toml"))
+    config["notes_dir"] = str(tmp_path)
+    config["open_in"] = "app"
+    monkeypatch.setattr(th, "run", fake_run)
+    monkeypatch.setattr(th, "load_config", lambda: config)
+    (tmp_path / "My-tab_934051cd9b3f4e91.md").write_text("## note\n\n")
+    alerts = []
+
+    class Notes(th.NoteTaker):
+        async def alert(self, session, title, message):
+            alerts.append((title, message))
+
+    asyncio.run(Notes(connection=None).perform("open_notes", FakeSession(str(tmp_path))))
+    [(title, message)] = alerts
+    assert title == "term-notes: open notes failed" and "/usr/bin/open" in message
