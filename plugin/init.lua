@@ -338,12 +338,17 @@ local function file_exists(path)
 end
 
 -- The pane's notes file, renamed if the tab title changed.
--- title and cwd can be passed in so a save uses the values it records in
--- the note (they could change while it runs git).
-function M.notes_file(config, pane, title, cwd)
+-- A save passes `context` ({ title = ..., cwd = ... }) so the file name uses
+-- exactly the values it records in the note, even nil ones (they could
+-- change while it runs git). Without it, they are read now.
+function M.notes_file(config, pane, context)
   local id = pane_key(pane)
-  title = title or tab_title(pane)
-  cwd = cwd or cwd_of(pane)
+  local title, cwd
+  if context then
+    title, cwd = context.title, context.cwd
+  else
+    title, cwd = tab_title(pane), cwd_of(pane)
+  end
   local fields = { title = M.slug(title), dir = M.slug(M.basename(cwd)), id = id }
   local wanted = config.notes_dir .. '/' .. M.render_name(config.file_name, fields) .. '.md'
   local wildcard = M.render_name(config.file_name, { title = '*', dir = '*', id = id })
@@ -566,7 +571,7 @@ local function write_note(config, window, pane, text, from_clipboard, comment)
   local lines = M.clean_lines(text)
   -- Read once, so the note and its file name always agree.
   local title, cwd = tab_title(pane), cwd_of(pane)
-  local notes_file = M.notes_file(config, pane, title, cwd)
+  local notes_file = M.notes_file(config, pane, { title = title, cwd = cwd })
   run { 'mkdir', '-p', config.notes_dir }
   local ok = append(notes_file, M.format_note(lines, {
     when = os.date('%Y-%m-%d %H:%M'),

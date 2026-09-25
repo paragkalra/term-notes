@@ -784,3 +784,26 @@ def test_note_and_file_name_use_the_same_title(wez, tmp_path):
     [name] = os.listdir(tmp_path)
     assert name.startswith("First_")
     assert "· First" in (tmp_path / name).read_text()
+
+
+
+def test_captured_nil_cwd_is_kept(wez, tmp_path):
+    lua, plugin, _, _ = wez
+    actions = plugin.actions(plugin.settings(lua.table_from(
+        {"notes_dir": str(tmp_path), "file_name": "{dir}_{id}"})))
+    window, pane, _ = make_pane(lua, selection="x")
+    # No working directory on the first read, one on later reads.
+    pane.get_current_working_dir = lua.eval("""
+        function()
+          local calls = 0
+          return function()
+            calls = calls + 1
+            if calls == 1 then return nil end
+            return { file_path = '/Users/me/project' }
+          end
+        end
+    """)()
+    call(actions.save, window, pane)
+    [name] = os.listdir(tmp_path)
+    assert name.startswith("tab_")  # {dir} empty, like the note
+    assert "project" not in (tmp_path / name).read_text()
