@@ -364,10 +364,13 @@ function M.notes_file(config, pane)
     wezterm.log_warn('term-notes: several notes files match this pane; using ' .. newest)
     return newest
   end
-  -- Never rename onto an existing file: that would silently replace it.
-  if file_exists(wanted) or not os.rename(existing[1], wanted) then
+  -- Never rename onto an existing file: os.rename would silently replace
+  -- it. `ln` fails if the destination exists, so link then unlink; if that
+  -- isn't possible, keep the old name.
+  if not run { 'ln', existing[1], wanted } then
     return existing[1]
   end
+  os.remove(existing[1])
   return wanted
 end
 
@@ -463,14 +466,14 @@ local function toast(window, message)
   window:toast_notification('term-notes', message, nil, 3000)
 end
 
--- Change `path` without ever leaving it half-written: copy it (`cp -p`
--- keeps its permissions, which plain Lua can't set) to a uniquely named temp
--- file, write `content` there in `mode` ('a' appends, 'w' replaces), then
--- rename the temp file over `path`. On any failure `path` is untouched.
-local function rewrite(path, mode, content)
+-- Replace `path`'s content without ever leaving it half-written: copy it
+-- (`cp -p` keeps its permissions, which plain Lua can't set) to a uniquely
+-- named temp file, write `content` there, then rename the temp file over
+-- `path`. On any failure `path` is untouched. Used by undo, which is rare;
+-- saves append instead (see append).
+local function rewrite(path, content)
   local tmp = string.format('%s.%016x.tmp', path, math.random(0))
-  local copied = not file_exists(path) or run { 'cp', '-p', path, tmp }
-  local f = copied and io.open(tmp, mode)
+  local f = run { 'cp', '-p', path, tmp } and io.open(tmp, 'w')
   local ok = f and f:write(content)
   ok = f and f:close() and ok
   ok = ok and os.rename(tmp, path)
@@ -480,8 +483,32 @@ local function rewrite(path, mode, content)
   return ok
 end
 
+-- Append `content` to `path`, writing only the new note. If the write fails
+-- the file is cut back to its original size (plain Lua can't truncate, so
+-- via dd: POSIX, and the same on macOS and Linux), or removed if it was new,
+-- so a disk-full or interrupted write never leaves half a note behind.
+local function append(path, content)
+  local existed = file_exists(path)
+  local f = io.open(path, 'a')
+  if not f then
+    return false
+  end
+  local size = f:seek('end')
+  local ok = f:write(content)
+  ok = f:close() and ok
+  if ok then
+    return true
+  end
+  if not existed then
+    os.remove(path)
+  elseif size then
+    run { 'dd', 'if=/dev/null', 'of=' .. path, 'bs=1', 'seek=' .. size }
+  end
+  return false
+end
+
 -- pane id -> true while a save or undo is changing its notes file. rewrite
--- yields (in `cp`), and two overlapping copy-and-rename writes would lose
+-- yields (in `cp`), and an append overlapping a copy-and-rename would lose
 -- one of them, so a second one is turned away instead.
 local busy = {}
 
@@ -506,7 +533,7 @@ local function write_note(config, window, pane, text, from_clipboard, comment)
   local cwd = cwd_of(pane)
   local notes_file = M.notes_file(config, pane)
   run { 'mkdir', '-p', config.notes_dir }
-  local ok = rewrite(notes_file, 'a', M.format_note(lines, {
+  local ok = append(notes_file, M.format_note(lines, {
     when = os.date('%Y-%m-%d %H:%M'),
     title = tab_title(pane),
     cwd = cwd,
@@ -599,12 +626,13 @@ function M.actions(config)
       return
     end
     if remaining:find('%S') then
-      if not rewrite(notes_file, 'w', remaining) then
+      if not rewrite(notes_file, remaining) then
         toast(window, 'Could not update ' .. notes_file)
         return
       end
-    else
-      os.remove(notes_file)
+    elseif not os.remove(notes_file) then
+      toast(window, 'Could not remove ' .. notes_file)
+      return
     end
     last_clipboard[pane_id(pane)] = nil
     toast(window, 'Removed last note')

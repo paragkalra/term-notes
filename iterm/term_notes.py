@@ -225,6 +225,7 @@ def append_note(notes_file, note):
     """Append a note; on failure the file is cut back to its original size,
     so a disk-full or interrupted write never leaves half a note behind."""
     os.makedirs(os.path.dirname(notes_file), exist_ok=True)
+    existed = os.path.exists(notes_file)
     with open(notes_file, "ab") as f:
         size = f.seek(0, os.SEEK_END)
         try:
@@ -234,6 +235,8 @@ def append_note(notes_file, note):
         except BaseException:
             with contextlib.suppress(OSError):
                 f.truncate(size)
+                if not existed:  # don't leave an empty file behind
+                    os.remove(notes_file)
             raise
 
 

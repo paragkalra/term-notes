@@ -20,13 +20,18 @@ def load_wezterm_plugin(home="/Users/me"):
     """Load plugin/init.lua in Lua with a minimal stub of the wezterm module.
 
     Returns (lua runtime, plugin module table, stub table, fake). Set
-    fake["clipboard"] to control what the plugin reads from the clipboard.
+    fake["clipboard"] to control what the plugin reads from the clipboard,
+    add command names to fake["fail"] to make them fail, and read the
+    commands that ran from fake["calls"].
     """
     lua = lupa.LuaRuntime(unpack_returned_tuples=True)
-    fake = {"clipboard": None}
+    fake = {"clipboard": None, "calls": [], "fail": set()}
 
     def run_child_process(args):
         argv = [args[i] for i in range(1, len(args) + 1)]
+        fake["calls"].append(argv)
+        if argv[0] in fake["fail"]:
+            return False, "", "failed on purpose"
         if argv[0] in ("pbpaste", "wl-paste", "xclip"):
             clip = fake["clipboard"]
             return clip is not None, clip or "", ""

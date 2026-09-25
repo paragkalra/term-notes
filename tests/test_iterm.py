@@ -613,3 +613,16 @@ def test_queued_action_after_close_is_cleaned_up(tmp_path, monkeypatch):
     assert SESSION not in notes.last_clipboard
     assert SESSION not in notes.locks and SESSION not in notes.active
     assert not notes.closed
+
+
+
+def test_failed_first_append_leaves_no_file(tmp_path, monkeypatch):
+    path = tmp_path / "new.md"
+
+    def disk_full(fd):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(th.os, "fsync", disk_full)
+    with pytest.raises(OSError):
+        th.append_note(str(path), th.format_note(["first"], when=WHEN))
+    assert not path.exists()

@@ -546,6 +546,7 @@ def test_failed_append_leaves_no_partial_note(wez, tmp_path):
           local f, err = real_open(path, mode)
           if not f or mode ~= 'a' then return f, err end
           return {
+            seek = function(_, ...) return f:seek(...) end,
             write = function(_, s) f:write(s:sub(1, #s // 2)); return nil, 'No space left on device' end,
             close = function() return f:close() end,
           }
@@ -583,3 +584,68 @@ def test_overlapping_saves_in_a_pane_do_not_lose_notes(wez, tmp_path):
     content = (tmp_path / name).read_text()
     assert "> first" in content and "> second" in content
     assert "Still saving the previous note; try again" in list(state.toasts.values())
+
+
+
+def test_save_writes_only_the_new_note(wez, tmp_path):
+    lua, plugin, _, fake = wez
+    actions = plugin.actions(settings_for(lua, plugin, tmp_path))
+    window, pane, state = make_pane(lua, selection="one")
+    call(actions.save, window, pane)
+    fake["calls"].clear()
+    for i in range(3):
+        state.selection = f"note {i}"
+        call(actions.save, window, pane)
+    assert not [c for c in fake["calls"] if c[0] in ("cp", "dd")]  # no whole-file copies
+    [name] = os.listdir(tmp_path)
+    assert (tmp_path / name).read_text().count("## ") == 4
+
+
+def test_failed_first_append_leaves_no_file(wez, tmp_path):
+    lua, plugin, _, _ = wez
+    actions = plugin.actions(settings_for(lua, plugin, tmp_path))
+    lua.execute("""
+        local real_open = io.open
+        io.open = function(path, mode)
+          local f, err = real_open(path, mode)
+          if not f or mode ~= 'a' then return f, err end
+          return {
+            seek = function(_, ...) return f:seek(...) end,
+            write = function(_, s) f:write(s:sub(1, 3)); return nil, 'No space left on device' end,
+            close = function() return f:close() end,
+          }
+        end
+    """)
+    window, pane, _ = make_pane(lua, selection="first ever note")
+    call(actions.save, window, pane)
+    assert os.listdir(tmp_path) == []
+
+
+def test_undo_of_only_note_reports_failed_delete(wez, tmp_path):
+    lua, plugin, _, fake = wez
+    actions = plugin.actions(settings_for(lua, plugin, tmp_path))
+    window, pane, state = make_pane(lua, selection="")
+    fake["clipboard"] = "only note"
+    call(actions.save, window, pane)
+    [name] = os.listdir(tmp_path)
+    tmp_path.chmod(0o555)  # the file can't be deleted
+    try:
+        call(actions.undo, window, pane)
+    finally:
+        tmp_path.chmod(0o755)
+    assert os.listdir(tmp_path) == [name]
+    assert list(state.toasts.values())[-1].startswith("Could not remove")
+    assert plugin._state.last_clipboard["1"] is not None  # state unchanged
+
+
+def test_rename_keeps_old_name_when_no_safe_rename(wez, tmp_path):
+    lua, plugin, _, fake = wez
+    actions = plugin.actions(settings_for(lua, plugin, tmp_path))
+    window, pane, state = make_pane(lua, title="First", selection="a")
+    call(actions.save, window, pane)
+    [first] = os.listdir(tmp_path)
+    fake["fail"].add("ln")  # no atomic no-replace rename available
+    state.title, state.selection = "Second", "b"
+    call(actions.save, window, pane)
+    assert os.listdir(tmp_path) == [first]  # kept the old name, didn't overwrite
+    assert (tmp_path / first).read_text().count("## ") == 2
