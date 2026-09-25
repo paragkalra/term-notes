@@ -28,7 +28,7 @@ import tomllib
 
 import iterm2
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 CONFIG_PATH = os.path.expanduser(
     os.environ.get("TERM_NOTES_CONFIG", "~/.config/term-notes/config.toml"))
