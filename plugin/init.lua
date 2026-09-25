@@ -79,12 +79,28 @@ function M.render_name(template, fields)
   end))
 end
 
+-- Same as the iTerm2 script's clean_lines: trim trailing padding and outer
+-- blank lines, remove shared indentation, keep internal structure.
 function M.clean_lines(text)
   local lines = {}
   for line in ((text or '') .. '\n'):gmatch('(.-)\r?\n') do
-    if line:find('%S') then
-      lines[#lines + 1] = line:gsub('%s+$', '')
+    lines[#lines + 1] = (line:gsub('%s+$', ''))
+  end
+  while #lines > 0 and lines[1] == '' do
+    table.remove(lines, 1)
+  end
+  while #lines > 0 and lines[#lines] == '' do
+    table.remove(lines)
+  end
+  local indent
+  for _, line in ipairs(lines) do
+    if line ~= '' then
+      local n = #line:match('^%s*')
+      indent = indent and math.min(indent, n) or n
     end
+  end
+  for i, line in ipairs(lines) do
+    lines[i] = line:sub((indent or 0) + 1)
   end
   return lines
 end
@@ -96,16 +112,26 @@ function M.abbreviate_home(path, home)
   return path
 end
 
+-- Metadata must stay on one line: a newline followed by "## " would look
+-- like the start of another note to without_last_note.
+function M.one_line(text)
+  if not text then
+    return text
+  end
+  return (text:gsub('%s*[\r\n]+%s*', ' '):match('^%s*(.-)%s*$'))
+end
+
 -- Same format as the iTerm2 script's format_note.
 function M.format_note(lines, opts)
+  local title, cwd, comment = M.one_line(opts.title), M.one_line(opts.cwd), M.one_line(opts.comment)
   local header = '## ' .. opts.when
-  if opts.title and opts.title ~= '' then
-    header = header .. ' · ' .. opts.title
+  if title and title ~= '' then
+    header = header .. ' · ' .. title
   end
   local parts = { header }
   local context = {}
-  if opts.cwd and opts.cwd ~= '' then
-    context[#context + 1] = '`' .. M.abbreviate_home(opts.cwd, opts.home) .. '`'
+  if cwd and cwd ~= '' then
+    context[#context + 1] = '`' .. M.abbreviate_home(cwd, opts.home) .. '`'
   end
   if opts.git then
     context[#context + 1] = '`' .. opts.git[1] .. '` @ `' .. opts.git[2] .. '`'
@@ -114,12 +140,13 @@ function M.format_note(lines, opts)
     parts[#parts + 1] = table.concat(context, ' · ')
   end
   local quoted = {}
+  -- Blank lines become ">" so the quote stays one block.
   for i, line in ipairs(lines) do
-    quoted[i] = '> ' .. line:match('^%s*(.-)%s*$')
+    quoted[i] = ('> ' .. line):gsub('%s+$', '')
   end
   parts[#parts + 1] = table.concat(quoted, '\n')
-  if opts.comment and opts.comment:find('%S') then
-    parts[#parts + 1] = '**Comment:** ' .. opts.comment:match('^%s*(.-)%s*$')
+  if comment and comment:find('%S') then
+    parts[#parts + 1] = '**Comment:** ' .. comment
   end
   return table.concat(parts, '\n\n') .. '\n\n'
 end
@@ -144,6 +171,15 @@ function M.without_last_note(content)
     return nil
   end
   return content:sub(1, last - 1)
+end
+
+-- WezTerm before 20240127 returns the cwd as a URI string such as
+-- "file://host/my%20repo"; strip the scheme and host and percent-decode.
+function M.path_from_uri(uri)
+  local path = uri:gsub('^file://[^/]*', '')
+  return (path:gsub('%%(%x%x)', function(hex)
+    return string.char(tonumber(hex, 16))
+  end))
 end
 
 -- "ctrl+alt+shift+h" -> { key = 'h', mods = 'CTRL|ALT|SHIFT' }
@@ -191,10 +227,10 @@ local function cwd_of(pane)
   if cwd == nil then
     return nil
   end
-  if type(cwd) == 'string' then -- older WezTerm: "file://host/path"
-    return (cwd:gsub('^file://[^/]*', ''))
+  if type(cwd) == 'string' then
+    return M.path_from_uri(cwd)
   end
-  return cwd.file_path
+  return cwd.file_path -- already decoded
 end
 
 local function git_context(cwd)
@@ -257,36 +293,33 @@ end
 
 local last_clipboard = {}
 
+-- Returns text, from_clipboard.
 local function selected_text(window, pane)
   local text = window:get_selection_text_for_pane(pane)
   if text and text:find('%S') then
-    return text
+    return text, false
   end
   -- Apps with their own mouse handling (Claude Code, Codex, ...) copy their
   -- selection to the clipboard instead of making a terminal selection.
-  local key = pane_key(pane)
   text = read_clipboard()
-  if not text or text == last_clipboard[key] then
-    return nil
+  if not text or text == last_clipboard[pane_key(pane)] then
+    return nil, false
   end
-  last_clipboard[key] = text
-  return text
+  return text, true
 end
 
 local function toast(window, message)
   window:toast_notification('term-notes', message, nil, 3000)
 end
 
-local function save(config, window, pane, lines, comment)
+-- Appends the note; returns true on success.
+local function save(config, window, pane, text, from_clipboard, comment)
+  local lines = M.clean_lines(text)
   local cwd = cwd_of(pane)
   local notes_file = M.notes_file(config, pane)
   run { 'mkdir', '-p', config.notes_dir }
   local f = io.open(notes_file, 'a')
-  if not f then
-    toast(window, 'Could not write ' .. notes_file)
-    return
-  end
-  f:write(M.format_note(lines, {
+  local ok = f and f:write(M.format_note(lines, {
     when = os.date('%Y-%m-%d %H:%M'),
     title = tab_title(pane),
     cwd = cwd,
@@ -294,36 +327,43 @@ local function save(config, window, pane, lines, comment)
     git = config.git_context and git_context(cwd) or nil,
     comment = comment,
   }))
-  f:close()
+  ok = f and f:close() and ok
+  if not ok then
+    toast(window, 'Could not write ' .. notes_file)
+    return false
+  end
+  -- Only now that the note is on disk, so a failed save can be retried.
+  if from_clipboard then
+    last_clipboard[pane_key(pane)] = text
+  end
   wezterm.log_info('term-notes: saved ' .. #lines .. ' line(s) to ' .. notes_file)
+  return true
 end
 
 function M.actions(config)
   local actions = {}
 
   actions.save = wezterm.action_callback(function(window, pane)
-    local lines = M.clean_lines(selected_text(window, pane))
-    if #lines == 0 then
+    local text, from_clipboard = selected_text(window, pane)
+    if #M.clean_lines(text) == 0 then
       toast(window, 'Nothing selected')
       return
     end
-    save(config, window, pane, lines)
+    save(config, window, pane, text, from_clipboard)
   end)
 
   actions.save_with_comment = wezterm.action_callback(function(window, pane)
-    local lines = M.clean_lines(selected_text(window, pane))
-    if #lines == 0 then
+    local text, from_clipboard = selected_text(window, pane)
+    if #M.clean_lines(text) == 0 then
       toast(window, 'Nothing selected')
       return
     end
     window:perform_action(act.PromptInputLine {
       description = 'Comment for this note (Enter to save, Esc to cancel)',
       action = wezterm.action_callback(function(w, p, comment)
-        if comment == nil then
-          last_clipboard[pane_key(p)] = nil
-          return
+        if comment ~= nil then
+          save(config, w, p, text, from_clipboard, comment)
         end
-        save(config, w, p, lines, comment)
       end),
     }, pane)
   end)
@@ -358,9 +398,17 @@ function M.actions(config)
       return
     end
     if remaining:find('%S') then
-      local out = io.open(notes_file, 'w')
-      out:write(remaining)
-      out:close()
+      -- Write a temp file and rename it over the original, so a failed
+      -- write can't truncate the notes that are being kept.
+      local tmp = notes_file .. '.tmp'
+      local out = io.open(tmp, 'w')
+      local ok = out and out:write(remaining)
+      ok = out and out:close() and ok
+      if not ok or not os.rename(tmp, notes_file) then
+        os.remove(tmp)
+        toast(window, 'Could not update ' .. notes_file)
+        return
+      end
     else
       os.remove(notes_file)
     end

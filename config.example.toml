@@ -4,7 +4,7 @@
 # restart (Scripts > Manage > Console > restart).
 # WezTerm users pass the same settings to apply_to_config() instead.
 
-# Where notes are written. One Markdown file per tab.
+# Where notes are written. One Markdown file per tab (split panes get their own).
 notes_dir = "~/notes/term-notes"
 
 # File name for each tab's notes (".md" is added). Placeholders:

@@ -68,15 +68,37 @@ def test_notes_dir_with_glob_characters(tmp_path):
 
 
 def test_clean_lines():
-    text = "  ⏺ The fix is in auth.ts   \n\n   \n  line two (see #42).   \n"
-    assert th.clean_lines(text) == ["  ⏺ The fix is in auth.ts", "  line two (see #42)."]
+    text = "\n  \n  ⏺ The fix is in auth.ts   \n\n   \n  line two (see #42).   \n\n"
+    # Outer blank lines and shared indent go; inner blank lines stay.
+    assert th.clean_lines(text) == ["⏺ The fix is in auth.ts", "", "", "line two (see #42)."]
     assert th.clean_lines(None) == []
     assert th.clean_lines("\n  \n") == []
 
 
+def test_clean_lines_keeps_code_structure():
+    text = (
+        "    def f(x):\n"
+        "        if x:\n"
+        "            return 1\n"
+        "\n"
+        "        return 2\n"
+    )
+    assert th.clean_lines(text) == [
+        "def f(x):", "    if x:", "        return 1", "", "    return 2"]
+
+
+def test_format_note_keeps_structure():
+    lines = th.clean_lines("Traceback:\n  File a.py\n    boom()\n\nValueError: x")
+    note = th.format_note(lines, when=WHEN)
+    assert note == (
+        "## 2026-09-24 15:43\n\n"
+        "> Traceback:\n>   File a.py\n>     boom()\n>\n> ValueError: x\n\n"
+    )
+
+
 def test_format_note_full():
     home = os.path.expanduser("~")
-    note = th.format_note(["  first line", "second"], when=WHEN, title="✳ Claude Code",
+    note = th.format_note(["first line", "second"], when=WHEN, title="✳ Claude Code",
                           cwd=home + "/src/app", git=("app", "main"), comment=" check this ")
     assert note == (
         "## 2026-09-24 15:43 · ✳ Claude Code\n\n"
@@ -171,8 +193,114 @@ def test_git_context(tmp_path):
     assert asyncio.run(th.git_context(None)) is None
 
 
+def test_readme_documents_every_rpc_as_a_full_call():
+    with open(os.path.join(os.path.dirname(__file__), "..", "README.md")) as f:
+        readme = f.read()
+    for action in th.DEFAULTS["keys"]:
+        assert f"term_notes_{action}(session_id: id)" in readme
+
+
 def test_keystroke_patterns_forbid_other_modifiers():
     [pattern] = th.keystroke_patterns([th.parse_key("ctrl+alt+h")])
     assert set(pattern.required_modifiers) == {iterm2.Modifier.CONTROL, iterm2.Modifier.OPTION}
     assert set(pattern.forbidden_modifiers) == {iterm2.Modifier.SHIFT, iterm2.Modifier.COMMAND}
     assert pattern.keycodes == [iterm2.Keycode.ANSI_H]
+
+
+# --- Review fixes -----------------------------------------------------------
+
+def test_undo_keeps_notes_when_rewrite_fails(tmp_path, monkeypatch):
+    path = str(tmp_path / "n.md")
+    original = th.format_note(["one"], when=WHEN) + th.format_note(["two"], when=WHEN)
+    th.append_note(path, original)
+
+    def failing_replace(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(th.os, "replace", failing_replace)
+    with pytest.raises(OSError):
+        th.remove_last_note(path)
+    with open(path) as f:
+        assert f.read() == original  # nothing lost
+    assert os.listdir(tmp_path) == ["n.md"]  # temp file cleaned up
+
+
+@pytest.mark.parametrize("field", ["title", "cwd", "comment"])
+def test_multiline_metadata_cannot_fake_a_note_boundary(tmp_path, field):
+    path = str(tmp_path / "n.md")
+    first = th.format_note(["one"], when=WHEN)
+    second = th.format_note(["two"], when=WHEN, **{field: "task\n## subtitle\r\nmore"})
+    assert "task ## subtitle more" in second
+    th.append_note(path, first)
+    th.append_note(path, second)
+    assert th.remove_last_note(path)
+    with open(path) as f:
+        assert f.read() == first
+
+
+def test_run_kills_and_reaps_timed_out_process(monkeypatch):
+    procs = []
+    real_exec = asyncio.create_subprocess_exec
+
+    async def recording_exec(*args, **kwargs):
+        proc = await real_exec(*args, **kwargs)
+        procs.append(proc)
+        return proc
+
+    monkeypatch.setattr(th.asyncio, "create_subprocess_exec", recording_exec)
+    assert asyncio.run(th.run("sleep", "30", timeout=0.2)) is None
+    [proc] = procs
+    assert proc.returncode is not None  # killed and reaped, not left running
+
+
+def test_run_missing_command():
+    assert asyncio.run(th.run("/nonexistent/command")) is None
+
+
+class FakeSession:
+    """Just enough of iterm2.Session for NoteTaker.save, with no selection."""
+
+    session_id = SESSION
+    window = None
+
+    def __init__(self, cwd):
+        self.cwd = cwd
+
+        class Tab:
+            async def async_get_variable(self, name):
+                return "My tab"
+
+        self.tab = Tab()
+
+    async def async_get_selection(self):
+        class Selection:
+            subSelections = ()
+
+        return Selection()
+
+    async def async_get_variable(self, name):
+        return {"path": self.cwd, "name": "zsh"}[name]
+
+
+def test_clipboard_can_be_retried_after_failed_save(tmp_path, monkeypatch):
+    async def fake_run(*args, timeout=2):
+        return "copied by the app\n" if args[0] == "/usr/bin/pbpaste" else None
+
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("")
+    config = th.load_config(str(tmp_path / "missing.toml"))
+    config["notes_dir"] = str(blocker / "notes")  # makedirs will fail
+    monkeypatch.setattr(th, "run", fake_run)
+    monkeypatch.setattr(th, "load_config", lambda: config)
+
+    notes = th.NoteTaker(connection=None)
+    session = FakeSession(str(tmp_path))
+    with pytest.raises(OSError):
+        asyncio.run(notes.save(session))
+
+    config["notes_dir"] = str(tmp_path / "notes")
+    asyncio.run(notes.save(session))  # retry works: not treated as already saved
+    asyncio.run(notes.save(session))  # same clipboard again: skipped
+    [name] = os.listdir(tmp_path / "notes")
+    assert name == "My-tab_934051cd.md"
+    assert (tmp_path / "notes" / name).read_text().count("> copied by the app") == 1

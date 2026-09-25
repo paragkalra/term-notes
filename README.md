@@ -31,7 +31,10 @@ terminal: shells, SSH sessions, REPLs, log tails.
 
 - **One notes file per tab.** The file is named after the tab title, and
   renamed when the title changes. Agents like Claude Code set the title to
-  the current task, so file names describe what you were doing.
+  the current task, so file names describe what you were doing. If you split
+  a tab, each pane gets its own file.
+- **Keeps the text's shape.** Blank lines and indentation inside the
+  selection are kept, so code and stack traces survive intact.
 - **Works with agent TUIs.** Claude Code, Codex and similar tools handle the
   mouse themselves and copy selections to the clipboard. When the terminal
   has no selection, term-notes reads the clipboard instead. It skips
@@ -61,9 +64,15 @@ Tested with iTerm2 3.7. Uses iTerm2's Python runtime, which needs Python 3.11 or
 
 The script handles its own shortcuts, so there's nothing to set up in iTerm2's
 key bindings. If you'd rather bind keys yourself, set them to `""` in the
-config and use **Settings → Keys → Key Bindings → Invoke Script Function**
-with `term_notes_save(session_id: id)`, `term_notes_save_with_comment`,
-`term_notes_open_notes` or `term_notes_undo`.
+config. Then add bindings under **Settings → Keys → Key Bindings → Invoke
+Script Function**, entering one of these calls exactly:
+
+```
+term_notes_save(session_id: id)
+term_notes_save_with_comment(session_id: id)
+term_notes_open_notes(session_id: id)
+term_notes_undo(session_id: id)
+```
 
 ## WezTerm
 
@@ -121,7 +130,7 @@ restart (**Scripts → Manage → Console**, then restart).
   `mouse=a`, tmux mouse mode), <kbd>⌥</kbd>-drag so the terminal makes the
   selection.
 - If you press the shortcut without selecting anything in such an app,
-  whatever you last copied is saved, once per tab. <kbd>⌃⌥Z</kbd> undoes it.
+  whatever you last copied is saved, once per pane. <kbd>⌃⌥Z</kbd> undoes it.
 - In SSH sessions, `{dir}` and git context describe your local machine, not
   the remote one.
 - iTerm2 keeps tab ids across restarts only when it restores the tab. A new

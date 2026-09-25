@@ -13,6 +13,7 @@ Settings > General > Magic > Enable Python API. Configuration lives in
 https://github.com/paragkalra/term-notes
 """
 import asyncio
+import contextlib
 import datetime
 import glob
 import logging
@@ -98,8 +99,19 @@ def notes_file_for(notes_dir, template, session_id, title, cwd):
 
 
 def clean_lines(text):
-    # Drop the trailing padding and blank lines terminal selections pick up.
-    return [line.rstrip() for line in (text or "").splitlines() if line.strip()]
+    """Tidy a terminal selection without changing its structure.
+
+    Trims trailing padding, drops blank lines only at the start and end, and
+    removes the indentation shared by every line. Blank lines and relative
+    indentation inside the selection (code, stack traces, tables) are kept.
+    """
+    lines = [line.rstrip() for line in (text or "").splitlines()]
+    while lines and not lines[0]:
+        lines.pop(0)
+    while lines and not lines[-1]:
+        lines.pop()
+    indent = min((len(line) - len(line.lstrip()) for line in lines if line), default=0)
+    return [line[indent:] for line in lines]
 
 
 def abbreviate_home(path):
@@ -109,8 +121,15 @@ def abbreviate_home(path):
     return path
 
 
+def one_line(text):
+    # Metadata must stay on one line: a newline followed by "## " would look
+    # like the start of another note to remove_last_note.
+    return re.sub(r"\s*[\r\n]+\s*", " ", text).strip() if text else text
+
+
 def format_note(lines, *, when, title=None, cwd=None, git=None, comment=None):
     """Render one note. The format is shared with the WezTerm plugin."""
+    title, cwd, comment = one_line(title), one_line(cwd), one_line(comment)
     header = f"## {when:%Y-%m-%d %H:%M}"
     if title:
         header += f" · {title}"
@@ -123,7 +142,8 @@ def format_note(lines, *, when, title=None, cwd=None, git=None, comment=None):
     parts = [header]
     if context:
         parts.append(" · ".join(context))
-    parts.append("\n".join("> " + line.strip() for line in lines))
+    # Blank lines become ">" so the quote stays one block.
+    parts.append("\n".join(f"> {line}".rstrip() for line in lines))
     if comment:
         parts.append(f"**Comment:** {comment.strip()}")
     return "\n\n".join(parts) + "\n\n"
@@ -149,8 +169,19 @@ def remove_last_note(notes_file):
         return False
     remaining = content[:starts[-1]]
     if remaining.strip():
-        with open(notes_file, "w", encoding="utf-8") as f:
-            f.write(remaining)
+        # Write a temp file and rename it over the original, so a failed
+        # write can't truncate the notes that are being kept.
+        tmp = notes_file + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(remaining)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, notes_file)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.remove(tmp)
+            raise
     else:
         os.remove(notes_file)
     return True
@@ -188,8 +219,15 @@ async def run(*args, timeout=2):
     try:
         proc = await asyncio.create_subprocess_exec(
             *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    except OSError:
+        return None
+    try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout)
-    except (OSError, TimeoutError):
+    except TimeoutError:
+        # Kill and reap a hung command so they can't pile up.
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        await proc.communicate()
         return None
     return out.decode("utf-8", errors="replace") if proc.returncode == 0 else None
 
@@ -214,17 +252,17 @@ class NoteTaker:
         self.last_clipboard = {}
 
     async def selected_text(self, session):
+        """Return (text, from_clipboard)."""
         selection = await session.async_get_selection()
         if selection.subSelections:
-            return await session.async_get_selection_text(selection)
+            return await session.async_get_selection_text(selection), False
         # Apps with their own mouse handling (Claude Code, Codex, ...) make
         # the selection themselves and copy it to the clipboard, so iTerm2
         # never sees it. Fall back to the clipboard.
         text = await run("/usr/bin/pbpaste")
         if not text or text == self.last_clipboard.get(session.session_id):
-            return None
-        self.last_clipboard[session.session_id] = text
-        return text
+            return None, False
+        return text, True
 
     async def tab_title(self, session):
         title = await session.tab.async_get_variable("title") if session.tab else None
@@ -238,7 +276,8 @@ class NoteTaker:
 
     async def save(self, session, ask_comment=False):
         config = load_config()
-        lines = clean_lines(await self.selected_text(session))
+        text, from_clipboard = await self.selected_text(session)
+        lines = clean_lines(text)
         if not lines:
             log.info("nothing selected")
             return
@@ -246,11 +285,10 @@ class NoteTaker:
         if ask_comment:
             preview = lines[0] if len(lines[0]) <= 60 else lines[0][:57] + "..."
             comment = await iterm2.TextInputAlert(
-                "Save note",f"“{preview}”", "Your comment", "",
+                "Save note", f"“{preview}”", "Your comment", "",
                 session.window.window_id if session.window else None,
             ).async_run(self.connection)
             if comment is None:  # cancelled
-                self.last_clipboard.pop(session.session_id, None)
                 return
 
         title = await self.tab_title(session)
@@ -261,6 +299,9 @@ class NoteTaker:
         append_note(notes_file, format_note(
             lines, when=datetime.datetime.now(), title=title, cwd=cwd, git=git,
             comment=comment))
+        # Only now that the note is on disk, so a failed save can be retried.
+        if from_clipboard:
+            self.last_clipboard[session.session_id] = text
         log.info("saved %d line(s) to %s", len(lines), notes_file)
 
     async def undo(self, session):

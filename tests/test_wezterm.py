@@ -64,11 +64,12 @@ def test_slug_matches_python_for_ascii_titles(wez, title):
     {"cwd": HOME + "/src/app", "git": ("app", "main")},
     {"cwd": "/opt/x", "comment": "  why this matters  "},
     {"title": "T", "cwd": HOME, "git": ("r", "feat/x"), "comment": "c"},
+    {"title": "task\n## subtitle", "cwd": "/a\r\n/b", "comment": " line one\n  line two "},
 ])
 def test_note_format_matches_python(wez, monkeypatch, kwargs):
     lua, plugin, _, _ = wez
     monkeypatch.setattr(os.path, "expanduser", lambda p: p.replace("~", HOME, 1))
-    lines = ["  first line  ", "second"]
+    lines = th.clean_lines("  first line  \n\n     indented\n  second")
     expected = th.format_note(lines, when=datetime.datetime(2026, 9, 24, 15, 43), **kwargs)
     opts = {"when": "2026-09-24 15:43", "home": HOME, **kwargs}
     if "git" in opts:
@@ -85,10 +86,44 @@ def test_without_last_note(wez):
     assert plugin.without_last_note("") is None
 
 
-def test_clean_lines(wez):
+@pytest.mark.parametrize("text", [
+    "  a  \r\n\n  \nb\n",
+    "\n  \n  ⏺ The fix\n\n     indented more\n  back\n\n",
+    "    def f(x):\n        return 1\n\n    f(2)\n",
+    "\n  \n",
+    "",
+])
+def test_clean_lines_matches_python(wez, text):
     _, plugin, _, _ = wez
-    lines = plugin.clean_lines("  a  \r\n\n  \nb\n")
-    assert list(lines.values()) == ["  a", "b"]
+    assert list(plugin.clean_lines(text).values()) == th.clean_lines(text)
+
+
+@pytest.mark.parametrize("uri, path", [
+    ("file://host/Users/me/my%20repo", "/Users/me/my repo"),
+    ("file:///tmp/%E2%9C%B3%20x%25y", "/tmp/✳ x%y"),
+    ("file://host/plain", "/plain"),
+])
+def test_path_from_uri(wez, uri, path):
+    _, plugin, _, _ = wez
+    assert plugin.path_from_uri(uri) == path
+
+
+def test_old_wezterm_string_cwd_is_decoded(wez, tmp_path):
+    lua, plugin, _, _ = wez
+    repo = tmp_path / "my repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "trunk", str(repo)], check=True)
+    notes = tmp_path / "notes"
+    actions = plugin.actions(plugin.settings(lua.table_from(
+        {"notes_dir": str(notes), "file_name": "{dir}_{id}"})))
+    window, pane, _ = make_pane(lua, selection="x")
+    uri = "file://host" + str(repo).replace(" ", "%20")
+    pane.get_current_working_dir = lua.eval("function(uri) return function() return uri end end")(uri)
+    call(actions.save, window, pane)
+    [name] = os.listdir(notes)
+    assert name.startswith("my-repo_")
+    content = (notes / name).read_text()
+    assert "`myrepo`" not in content and "`my repo` @ `trunk`" in content
 
 
 def test_parse_key(wez):
@@ -241,3 +276,57 @@ def test_git_context(wez, tmp_path):
     call(actions.save, window, pane)
     [name] = os.listdir(notes)
     assert "`myrepo` @ `trunk`" in (notes / name).read_text()
+
+
+# --- Review fixes -----------------------------------------------------------
+
+def test_undo_keeps_notes_when_rewrite_fails(wez, tmp_path):
+    lua, plugin, _, _ = wez
+    actions = plugin.actions(settings_for(lua, plugin, tmp_path))
+    window, pane, state = make_pane(lua, selection="one")
+    call(actions.save, window, pane)
+    state.selection = "two"
+    call(actions.save, window, pane)
+    [name] = os.listdir(tmp_path)
+    before = (tmp_path / name).read_text()
+    tmp_path.chmod(0o555)  # the temp file can't be created
+    try:
+        call(actions.undo, window, pane)
+    finally:
+        tmp_path.chmod(0o755)
+    assert (tmp_path / name).read_text() == before  # nothing lost
+    assert os.listdir(tmp_path) == [name]
+    assert list(state.toasts.values())[-1].startswith("Could not update")
+
+
+def test_multiline_title_cannot_fake_a_note_boundary(wez, tmp_path):
+    lua, plugin, _, _ = wez
+    actions = plugin.actions(settings_for(lua, plugin, tmp_path))
+    window, pane, state = make_pane(lua, title="plain", selection="one")
+    call(actions.save, window, pane)
+    [name] = os.listdir(tmp_path)
+    first = (tmp_path / name).read_text()
+    state.title, state.selection = "plain", "two"
+    state.tab_title = "task\n## subtitle"
+    call(actions.save, window, pane)
+    [name] = os.listdir(tmp_path)
+    call(actions.undo, window, pane)
+    assert (tmp_path / name).read_text() == first
+
+
+def test_clipboard_can_be_retried_after_failed_save(wez, tmp_path):
+    lua, plugin, _, fake = wez
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("")
+    broken = plugin.actions(settings_for(lua, plugin, blocker / "notes"))
+    window, pane, state = make_pane(lua, selection="")
+    fake["clipboard"] = "copied by the app"
+    call(broken.save, window, pane)
+    assert list(state.toasts.values())[-1].startswith("Could not write")
+
+    notes = tmp_path / "notes"
+    working = plugin.actions(settings_for(lua, plugin, notes))
+    call(working.save, window, pane)  # retry works: not treated as already saved
+    call(working.save, window, pane)  # same clipboard again: skipped
+    [name] = os.listdir(notes)
+    assert (notes / name).read_text().count("> copied by the app") == 1
