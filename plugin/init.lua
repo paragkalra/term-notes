@@ -14,8 +14,10 @@ local M = {}
 
 M.defaults = {
   notes_dir = wezterm.home_dir .. '/notes/term-notes',
-  -- Placeholders: {title}, {dir}, {id}. {id} is appended if missing.
-  file_name = '{title}_{id}',
+  -- Placeholders: {title}, {dir}, {id}. Without {id}, panes with the same
+  -- title share a file; with it, each pane has its own, renamed when its
+  -- title changes.
+  file_name = '{title}',
   git_context = true,
   -- 'split' opens the notes in a split pane, 'app' in the default .md app.
   open_in = 'split',
@@ -51,8 +53,8 @@ end
 local PLACEHOLDERS = { title = true, dir = true, id = true }
 
 -- Same rules as the iTerm2 script's check_file_name: only plain {title},
--- {dir} and {id} (no format specs or escapes), no glob characters, and {id}
--- appended if missing.
+-- {dir} and {id} (no format specs or escapes), no glob characters or path
+-- separators.
 function M.check_file_name(template)
   local unknown = {}
   for name in template:gmatch('{([^{}]*)}') do
@@ -76,9 +78,6 @@ function M.check_file_name(template)
   -- Keeps every notes file directly inside notes_dir (no "../").
   if literal:find('[/\\]') then
     error("term-notes: file_name " .. template .. " can't contain / or \\", 0)
-  end
-  if not template:find('{id}', 1, true) then
-    template = template .. '_{id}'
   end
   return template
 end
@@ -354,6 +353,9 @@ function M.notes_file(config, pane, context)
   end
   local fields = { title = M.slug(title), dir = M.slug(M.basename(cwd)), id = id }
   local wanted = config.notes_dir .. '/' .. M.render_name(config.file_name, fields) .. '.md'
+  if not config.file_name:find('{id}', 1, true) then
+    return wanted -- shared by every pane with this title; nothing to rename
+  end
   local wildcard = M.render_name(config.file_name, { title = '*', dir = '*', id = id })
   local ok, existing = pcall(wezterm.glob, M.glob_escape(config.notes_dir) .. '/' .. wildcard .. '.md')
   if not ok or #existing == 0 then

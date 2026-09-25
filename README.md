@@ -29,10 +29,11 @@ terminal: shells, SSH sessions, REPLs, log tails.
 | <kbd>⌃⌥N</kbd> | Open this tab's notes in a split pane |
 | <kbd>⌃⌥Z</kbd> | Undo: remove the last note from this tab |
 
-- **One notes file per tab.** The file is named after the tab title, and
-  renamed when the title changes. Agents like Claude Code set the title to
-  the current task, so file names describe what you were doing. If you split
-  a tab, each pane gets its own file.
+- **One notes file per tab title.** Notes go to a file named after the tab
+  title, so reopening a tab or reconnecting an SSH session keeps adding to
+  the same file. Agents like Claude Code set the title to the current task,
+  so file names describe what you were doing. Prefer one file per tab that
+  follows title changes? Set `file_name = "{title}_{id}"`.
 - **Keeps the text's shape.** Blank lines and indentation inside the
   selection are kept, so code and stack traces survive intact.
 - **Works with agent TUIs.** Claude Code, Codex and similar tools handle the
@@ -110,7 +111,7 @@ iTerm2 reads `~/.config/term-notes/config.toml`, or the path in
 | Setting | Default | |
 |---|---|---|
 | `notes_dir` | `~/notes/term-notes` | Where notes files are written |
-| `file_name` | `{title}_{id}` | `{title}`, `{dir}`, `{id}` (tab id, required) |
+| `file_name` | `{title}` | `{title}`, `{dir}`, `{id}`. Without `{id}`, tabs with the same title share a file; with it, each tab (and split pane) has its own, renamed on title changes |
 | `git_context` | `true` | Record repo and branch |
 | `open_in` | `"split"` | `"split"` pane or `"app"` (default `.md` app) |
 | `split_command` | `less -R +G` | Viewer for the split pane (a list in Lua) |
@@ -151,8 +152,11 @@ when you aren't saving, or copy them elsewhere first.
   whatever you last copied is saved, once per pane. <kbd>⌃⌥Z</kbd> undoes it.
 - In SSH sessions, `{dir}` and git context describe your local machine, not
   the remote one.
-- iTerm2 keeps tab ids across restarts only when it restores the tab. A new
-  tab starts a new notes file.
+- Without `{id}`, tabs with generic titles (like `zsh`) share one file, and
+  <kbd>⌃⌥Z</kbd> removes the file's last note even if another tab with the
+  same title saved it.
+- With `{id}`, iTerm2 keeps a tab's id across restarts only when it restores
+  the tab, so a new tab starts a new notes file.
 - In file names, the WezTerm plugin keeps only ASCII letters and digits of
   the title. iTerm2 keeps letters in any language.
 

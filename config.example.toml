@@ -4,14 +4,18 @@
 # restart (Scripts > Manage > Console > restart).
 # WezTerm users pass the same settings to apply_to_config() instead.
 
-# Where notes are written. One Markdown file per tab (split panes get their own).
+# Where notes are written.
 notes_dir = "~/notes/term-notes"
 
-# File name for each tab's notes (".md" is added). Placeholders:
+# Notes file name (".md" is added). Placeholders:
 #   {title}  the tab title, e.g. "Fix-login-bug"
 #   {dir}    the working directory's name when the note is saved
-#   {id}     a short id for the tab (required; added if missing)
-file_name = "{title}_{id}"
+#   {id}     a short id for the tab
+# Without {id} (the default), tabs with the same title share a file, so a
+# reopened tab or a reconnected SSH session keeps its notes. With {id}, e.g.
+# "{title}_{id}", every tab (and split pane) gets its own file, renamed when
+# the tab's title changes.
+file_name = "{title}"
 
 # Add the git repo and branch of the working directory to each note.
 git_context = true

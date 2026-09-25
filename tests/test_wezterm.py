@@ -148,7 +148,7 @@ def test_settings_merge(wez):
     settings = plugin.settings(lua.eval(
         "{ file_name = '{title}', keys = { undo = false }, split_command = { 'cat' } }"))
     # (["keys"], not .keys, which is lupa's table method)
-    assert settings.file_name == "{title}_{id}"
+    assert settings.file_name == "{title}"  # {id} is optional
     assert settings["keys"].undo is False
     assert settings["keys"].save == "ctrl+alt+h"
     assert list(settings.split_command.values()) == ["cat"]
@@ -164,7 +164,9 @@ def test_apply_to_config_adds_bindings(wez):
 
 
 def settings_for(lua, plugin, tmp_path, **extra):
-    opts = {"notes_dir": str(tmp_path), "git_context": False, **extra}
+    # Most tests are about per-pane files, so they use the {id} template;
+    # the default ({title}, shared by title) has its own tests.
+    opts = {"notes_dir": str(tmp_path), "git_context": False, "file_name": "{title}_{id}", **extra}
     return plugin.settings(lua.table_from(opts))
 
 
@@ -783,7 +785,7 @@ def test_note_and_file_name_use_the_same_title(wez, tmp_path):
     """)()
     call(actions.save, window, pane)
     [name] = os.listdir(tmp_path)
-    assert name.startswith("First_")
+    assert name.startswith("First_")  # settings_for uses {title}_{id}
     assert "· First" in (tmp_path / name).read_text()
 
 
@@ -808,3 +810,17 @@ def test_captured_nil_cwd_is_kept(wez, tmp_path):
     [name] = os.listdir(tmp_path)
     assert name.startswith("tab_")  # {dir} empty, like the note
     assert "project" not in (tmp_path / name).read_text()
+
+
+
+def test_default_groups_notes_by_tab_title(wez, tmp_path):
+    lua, plugin, _, _ = wez
+    actions = plugin.actions(plugin.settings(lua.table_from({"notes_dir": str(tmp_path)})))
+    w1, p1, _ = make_pane(lua, pane_id=1, title="✳ my-host (ssh)", selection="one")
+    call(actions.save, w1, p1)
+    # A new pane (e.g. after reconnecting) with the same title.
+    w2, p2, _ = make_pane(lua, pane_id=2, title="✳ my-host (ssh)", selection="two")
+    call(actions.save, w2, p2)
+    assert os.listdir(tmp_path) == ["my-host-ssh.md"]
+    content = (tmp_path / "my-host-ssh.md").read_text()
+    assert "> one" in content and "> two" in content

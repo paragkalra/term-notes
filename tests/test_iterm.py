@@ -159,7 +159,7 @@ def test_load_config_overrides(tmp_path, caplog):
     )
     config = th.load_config(str(path))
     assert config["notes_dir"] == os.path.expanduser("~/elsewhere")
-    assert config["file_name"] == "{dir}-{title}_{id}"
+    assert config["file_name"] == "{dir}-{title}"
     assert config["git_context"] is False
     assert config["keys"]["undo"] == ""
     assert config["keys"]["save"] == "ctrl+alt+h"  # other keys keep defaults
@@ -308,7 +308,7 @@ def test_clipboard_can_be_retried_after_failed_save(tmp_path, monkeypatch):
     asyncio.run(notes.save(session))  # retry works: not treated as already saved
     asyncio.run(notes.save(session))  # same clipboard again: skipped
     [name] = listdir(tmp_path / "notes")
-    assert name == "My-tab_934051cd9b3f4e91.md"
+    assert name == "My-tab.md"  # default: one file per tab title
     assert (tmp_path / "notes" / name).read_text().count("> copied by the app") == 1
 
 
@@ -393,7 +393,7 @@ def test_bad_file_name_template_is_rejected(tmp_path, template, message):
 
 
 def test_good_file_name_templates():
-    assert th.check_file_name("{title}") == "{title}_{id}"
+    assert th.check_file_name("{title}") == "{title}"
     assert th.check_file_name("{dir}-{title}-{id}") == "{dir}-{title}-{id}"
 
 
@@ -658,7 +658,7 @@ def test_open_in_app_failure_shows_an_alert(tmp_path, monkeypatch):
     config["open_in"] = "app"
     monkeypatch.setattr(th, "run", fake_run)
     monkeypatch.setattr(th, "load_config", lambda: config)
-    (tmp_path / "My-tab_934051cd9b3f4e91.md").write_text("## note\n\n")
+    (tmp_path / "My-tab.md").write_text("## note\n\n")
     alerts = []
 
     class Notes(th.NoteTaker):
@@ -864,7 +864,7 @@ def test_note_and_file_name_use_the_same_title(tmp_path, monkeypatch):
 
     asyncio.run(th.NoteTaker(connection=None).save(ChangingTitle(str(tmp_path))))
     [name] = listdir(tmp_path / "notes")
-    assert name.startswith("First_")
+    assert name == "First.md"
     assert "· First" in (tmp_path / "notes" / name).read_text()
 
 
@@ -877,3 +877,22 @@ def test_empty_cells_and_no_break_spaces_become_spaces():
         "It depends on where you are. In late September",
         "  is heading toward the end.",
     ]
+
+
+
+def test_default_groups_notes_by_tab_title(tmp_path):
+    # A reopened tab or reconnected SSH session gets a new session id but
+    # keeps its title, so it keeps its file.
+    template = th.load_config(str(tmp_path / "missing.toml"))["file_name"]
+    assert template == "{title}"
+    a = th.save_note(str(tmp_path), template, SESSION, "✳ my-host (ssh)", None, "## one\n\n")
+    b = th.save_note(str(tmp_path), template, "AAAA1111-2222-3333-4444-555566667777",
+                     "✳ my-host (ssh)", None, "## two\n\n")
+    assert a == b and os.path.basename(a) == "my-host-ssh.md"
+    assert (tmp_path / "my-host-ssh.md").read_text() == "## one\n\n## two\n\n"
+
+
+def test_title_change_without_id_starts_a_new_file(tmp_path):
+    th.save_note(str(tmp_path), "{title}", SESSION, "First", None, "## one\n\n")
+    th.save_note(str(tmp_path), "{title}", SESSION, "Second", None, "## two\n\n")
+    assert sorted(listdir(tmp_path)) == ["First.md", "Second.md"]  # nothing renamed

@@ -35,9 +35,10 @@ CONFIG_PATH = os.path.expanduser(
 
 DEFAULTS = {
     "notes_dir": "~/notes/term-notes",
-    # Placeholders: {title}, {dir}, {id}. {id} is required so each tab keeps
-    # its own file; it is appended automatically if missing.
-    "file_name": "{title}_{id}",
+    # Placeholders: {title}, {dir}, {id}. Without {id}, tabs with the same
+    # title share a file (it survives reopening the tab or reconnecting). With
+    # {id}, each tab has its own file, renamed when its title changes.
+    "file_name": "{title}",
     "git_context": True,
     # "split" opens the notes in a split pane, "app" in the default .md app.
     "open_in": "split",
@@ -82,7 +83,7 @@ PLACEHOLDER = re.compile(r"\{([^{}]*)\}")
 
 
 def check_file_name(template):
-    """Validate a file_name template; appends {id} if it is missing.
+    """Validate a file_name template.
 
     Only plain {title}, {dir} and {id} are allowed -- no format specs,
     conversions or {{escapes}} -- so the WezTerm plugin can apply exactly the
@@ -103,8 +104,6 @@ def check_file_name(template):
     if re.search(r"[/\\]", literal):
         # Keeps every notes file directly inside notes_dir (no "../").
         raise ValueError(f"config: file_name {template!r} can't contain / or \\")
-    if "{id}" not in template:
-        template += "_{id}"
     return template
 
 
@@ -125,15 +124,19 @@ def short_id(session_id):
 
 
 def notes_file_for(notes_dir, template, session_id, title, cwd):
-    """Return the tab's notes file, renaming it if the tab title changed.
+    """Return the tab's notes file.
 
-    The {id} in the file name identifies the tab's file across title changes
-    and script restarts. (Split panes are separate sessions, so each pane
-    gets its own file.)
+    Without {id} in the template, that's simply the rendered name: every tab
+    with the same title shares it. With {id}, the id identifies the tab's file
+    across title changes and script restarts, and the file is renamed when the
+    title changes. (Split panes are separate sessions, so each pane gets its
+    own id.)
     """
     fields = {"title": slug(title), "dir": slug(os.path.basename(cwd or "")),
               "id": short_id(session_id)}
     wanted = os.path.join(notes_dir, render_name(template, fields) + ".md")
+    if "{id}" not in template:
+        return wanted
     existing = find_notes_files(notes_dir, template, fields["id"])
     if not existing:
         # Files from earlier versions end in an 8-character id; migrate one
