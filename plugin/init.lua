@@ -463,14 +463,50 @@ local function toast(window, message)
   window:toast_notification('term-notes', message, nil, 3000)
 end
 
+-- Change `path` without ever leaving it half-written: copy it (`cp -p`
+-- keeps its permissions, which plain Lua can't set) to a uniquely named temp
+-- file, write `content` there in `mode` ('a' appends, 'w' replaces), then
+-- rename the temp file over `path`. On any failure `path` is untouched.
+local function rewrite(path, mode, content)
+  local tmp = string.format('%s.%016x.tmp', path, math.random(0))
+  local copied = not file_exists(path) or run { 'cp', '-p', path, tmp }
+  local f = copied and io.open(tmp, mode)
+  local ok = f and f:write(content)
+  ok = f and f:close() and ok
+  ok = ok and os.rename(tmp, path)
+  if not ok then
+    os.remove(tmp)
+  end
+  return ok
+end
+
+-- pane id -> true while a save or undo is changing its notes file. rewrite
+-- yields (in `cp`), and two overlapping copy-and-rename writes would lose
+-- one of them, so a second one is turned away instead.
+local busy = {}
+
+local function exclusive(window, pane, fn, ...)
+  local id = pane_id(pane)
+  if busy[id] then
+    toast(window, 'Still saving the previous note; try again')
+    return false
+  end
+  busy[id] = true
+  local ok, result = pcall(fn, ...)
+  busy[id] = nil
+  if not ok then
+    error(result)
+  end
+  return result
+end
+
 -- Appends the note; returns true on success.
 local function write_note(config, window, pane, text, from_clipboard, comment)
   local lines = M.clean_lines(text)
   local cwd = cwd_of(pane)
   local notes_file = M.notes_file(config, pane)
   run { 'mkdir', '-p', config.notes_dir }
-  local f = io.open(notes_file, 'a')
-  local ok = f and f:write(M.format_note(lines, {
+  local ok = rewrite(notes_file, 'a', M.format_note(lines, {
     when = os.date('%Y-%m-%d %H:%M'),
     title = tab_title(pane),
     cwd = cwd,
@@ -478,7 +514,6 @@ local function write_note(config, window, pane, text, from_clipboard, comment)
     git = config.git_context and git_context(cwd) or nil,
     comment = comment,
   }))
-  ok = f and f:close() and ok
   if not ok then
     toast(window, 'Could not write ' .. notes_file)
     return false
@@ -494,7 +529,7 @@ end
 
 -- write_note, always releasing the pending clipboard claim, even on error.
 local function save(config, window, pane, text, from_clipboard, comment)
-  local ok, result = pcall(write_note, config, window, pane, text, from_clipboard, comment)
+  local ok, result = pcall(exclusive, window, pane, write_note, config, window, pane, text, from_clipboard, comment)
   release(pane, from_clipboard)
   if not ok then
     error(result)
@@ -552,7 +587,7 @@ function M.actions(config)
     pane:split { direction = 'Right', args = args }
   end)
 
-  actions.undo = wezterm.action_callback(function(window, pane)
+  local function undo(window, pane)
     local notes_file = M.notes_file(config, pane)
     local f = io.open(notes_file, 'r')
     local remaining = f and M.without_last_note(f:read('a'))
@@ -564,16 +599,7 @@ function M.actions(config)
       return
     end
     if remaining:find('%S') then
-      -- Write a uniquely named temp file and rename it over the original, so
-      -- a failed write can't truncate the notes that are being kept. The temp
-      -- file starts as a `cp -p` copy so it keeps the original's permissions
-      -- (plain Lua can't set them); opening it for writing truncates it.
-      local tmp = string.format('%s.%08x.tmp', notes_file, math.random(0, 0x7fffffff))
-      local out = run { 'cp', '-p', notes_file, tmp } and io.open(tmp, 'w')
-      local ok = out and out:write(remaining)
-      ok = out and out:close() and ok
-      if not ok or not os.rename(tmp, notes_file) then
-        os.remove(tmp)
+      if not rewrite(notes_file, 'w', remaining) then
         toast(window, 'Could not update ' .. notes_file)
         return
       end
@@ -582,6 +608,10 @@ function M.actions(config)
     end
     last_clipboard[pane_id(pane)] = nil
     toast(window, 'Removed last note')
+  end
+
+  actions.undo = wezterm.action_callback(function(window, pane)
+    exclusive(window, pane, undo, window, pane)
   end)
 
   return actions

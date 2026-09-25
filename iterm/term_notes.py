@@ -133,8 +133,11 @@ def notes_file_for(notes_dir, template, session_id, title, cwd):
     fields = {"title": slug(title), "dir": slug(os.path.basename(cwd or "")),
               "id": short_id(session_id)}
     wanted = os.path.join(notes_dir, render_name(template, fields) + ".md")
-    wildcard = render_name(template, {"title": "*", "dir": "*", "id": fields["id"]}) + ".md"
-    existing = glob.glob(os.path.join(glob.escape(notes_dir), wildcard))
+    existing = find_notes_files(notes_dir, template, fields["id"])
+    if not existing:
+        # Files from earlier versions end in an 8-character id; migrate one
+        # if found. (This glob can't match new 16-character ids.)
+        existing = find_notes_files(notes_dir, template, fields["id"][:8])
     if not existing or wanted in existing:
         return wanted
     if len(existing) > 1:
@@ -146,18 +149,20 @@ def notes_file_for(notes_dir, template, session_id, title, cwd):
     return rename_no_clobber(existing[0], wanted)
 
 
+def find_notes_files(notes_dir, template, file_id):
+    wildcard = render_name(template, {"title": "*", "dir": "*", "id": file_id}) + ".md"
+    return glob.glob(os.path.join(glob.escape(notes_dir), wildcard))
+
+
 def rename_no_clobber(src, dst):
     """Rename src to dst unless dst exists; returns the path now in use."""
     try:
         os.link(src, dst)  # fails if dst exists, unlike os.rename
-    except FileExistsError:
-        log.warning("not renaming %s: %s already exists", src, dst)
+    except OSError as e:
+        # dst exists, or the filesystem has no hard links. There is no safe
+        # rename without them (check-then-rename races), so keep the old name.
+        log.warning("not renaming %s to %s: %s", src, dst, e)
         return src
-    except OSError:  # filesystem without hard links
-        if os.path.exists(dst):
-            return src
-        os.rename(src, dst)
-        return dst
     os.remove(src)
     return dst
 
@@ -217,9 +222,19 @@ def format_note(lines, *, when, title=None, cwd=None, git=None, comment=None):
 
 
 def append_note(notes_file, note):
+    """Append a note; on failure the file is cut back to its original size,
+    so a disk-full or interrupted write never leaves half a note behind."""
     os.makedirs(os.path.dirname(notes_file), exist_ok=True)
-    with open(notes_file, "a", encoding="utf-8") as f:
-        f.write(note)
+    with open(notes_file, "ab") as f:
+        size = f.seek(0, os.SEEK_END)
+        try:
+            f.write(note.encode("utf-8"))
+            f.flush()
+            os.fsync(f.fileno())
+        except BaseException:
+            with contextlib.suppress(OSError):
+                f.truncate(size)
+            raise
 
 
 def remove_last_note(notes_file):
@@ -365,17 +380,18 @@ class NoteTaker:
         # and undos in a tab run one at a time, so two quick presses can't
         # both pass the clipboard check before either has saved.
         self.locks = collections.defaultdict(asyncio.Lock)
-        # Sessions that closed while one of their actions was running.
+        # session id -> actions running or waiting for its lock.
+        self.active = collections.Counter()
+        # Sessions that closed while they still had active actions.
         self.closed = set()
 
     def forget(self, session_id):
         """Drop per-session state once the session has closed.
 
-        If a save or undo is still running for it, that action purges the
-        state when it finishes (it could otherwise re-add it afterwards).
+        If actions are still running or queued for it, the last one to finish
+        purges the state (they could otherwise re-add it afterwards).
         """
-        lock = self.locks.get(session_id)
-        if lock is not None and lock.locked():
+        if self.active[session_id]:
             self.closed.add(session_id)
         else:
             self.purge(session_id)
@@ -383,15 +399,19 @@ class NoteTaker:
     def purge(self, session_id):
         self.last_clipboard.pop(session_id, None)
         self.locks.pop(session_id, None)
+        self.active.pop(session_id, None)
         self.closed.discard(session_id)
 
     async def exclusive(self, session_id, action):
         """Run action while holding the session's lock."""
+        # Counted before waiting for the lock, so queued actions count too.
+        self.active[session_id] += 1
         try:
             async with self.locks[session_id]:
                 await action()
         finally:
-            if session_id in self.closed:
+            self.active[session_id] -= 1
+            if not self.active[session_id] and session_id in self.closed:
                 self.purge(session_id)
 
     async def perform(self, name, session):

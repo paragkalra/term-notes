@@ -528,3 +528,58 @@ def test_digest_distinguishes_texts(wez):
     _, plugin, _, _ = wez
     values = {plugin.digest(t) for t in ["", "a", "b", "ab", "ba", "a large selection"]}
     assert len(values) == 6
+
+
+
+def test_failed_append_leaves_no_partial_note(wez, tmp_path):
+    lua, plugin, _, _ = wez
+    actions = plugin.actions(settings_for(lua, plugin, tmp_path))
+    window, pane, state = make_pane(lua, selection="one")
+    call(actions.save, window, pane)
+    [name] = os.listdir(tmp_path)
+    before = (tmp_path / name).read_text()
+
+    # Make appends write half their data and then report disk full.
+    lua.execute("""
+        local real_open = io.open
+        io.open = function(path, mode)
+          local f, err = real_open(path, mode)
+          if not f or mode ~= 'a' then return f, err end
+          return {
+            write = function(_, s) f:write(s:sub(1, #s // 2)); return nil, 'No space left on device' end,
+            close = function() return f:close() end,
+          }
+        end
+    """)
+    state.selection = "two " * 100
+    call(actions.save, window, pane)
+    assert (tmp_path / name).read_text() == before
+    assert os.listdir(tmp_path) == [name]  # temp file cleaned up
+    assert list(state.toasts.values())[-1].startswith("Could not write")
+
+
+def test_overlapping_saves_in_a_pane_do_not_lose_notes(wez, tmp_path):
+    # rewrite() yields in `cp` in real WezTerm, so a second save can start in
+    # the middle of one. Simulate it by saving again from inside the first.
+    lua, plugin, _, _ = wez
+    actions = plugin.actions(settings_for(lua, plugin, tmp_path))
+    window, pane, state = make_pane(lua, selection="first", cwd=str(tmp_path))
+    call(actions.save, window, pane)
+    nested = {"done": False}
+    real_cwd = pane.get_current_working_dir
+
+    def cwd_with_nested_save(p):
+        if not nested["done"]:
+            nested["done"] = True
+            state.selection = "nested"
+            call(actions.save, window, pane)
+            state.selection = "second"
+        return real_cwd(p)
+
+    pane.get_current_working_dir = cwd_with_nested_save
+    state.selection = "second"
+    call(actions.save, window, pane)
+    [name] = os.listdir(tmp_path)
+    content = (tmp_path / name).read_text()
+    assert "> first" in content and "> second" in content
+    assert "Still saving the previous note; try again" in list(state.toasts.values())

@@ -464,15 +464,15 @@ def test_clipboard_state_is_a_digest_and_forgotten(tmp_path, monkeypatch):
     assert SESSION not in notes.last_clipboard and SESSION not in notes.locks
 
 
-def test_forget_keeps_a_lock_that_is_in_use():
+def test_forget_keeps_state_while_an_action_runs():
     notes = th.NoteTaker(connection=None)
 
-    async def scenario():
-        async with notes.locks[SESSION]:
-            notes.forget(SESSION)
-            assert SESSION in notes.locks
+    async def action():
+        notes.forget(SESSION)
+        assert SESSION in notes.locks and SESSION in notes.closed
 
-    asyncio.run(scenario())
+    asyncio.run(notes.exclusive(SESSION, action))
+    assert SESSION not in notes.locks and not notes.closed  # purged afterwards
 
 
 
@@ -523,3 +523,93 @@ def test_conflicting_shortcuts_are_all_disabled(tmp_path):
     assert names == {"save_with_comment", "open_notes"}
     [error] = errors
     assert "save (alt+ctrl+z)" in error and "undo (ctrl+alt+z)" in error
+
+
+
+def test_legacy_8_character_file_is_migrated(tmp_path):
+    legacy = tmp_path / "Old-title_934051cd.md"
+    legacy.write_text("## old note\n\n")
+    path = th.notes_file_for(str(tmp_path), "{title}_{id}", SESSION, "New title", None)
+    assert os.path.basename(path) == "New-title_934051cd9b3f4e91.md"
+    assert os.listdir(tmp_path) == ["New-title_934051cd9b3f4e91.md"]
+    with open(path) as f:
+        assert f.read() == "## old note\n\n"
+
+
+def test_legacy_lookup_only_when_no_current_file(tmp_path):
+    (tmp_path / "Old_934051cd.md").write_text("legacy")
+    current = tmp_path / "Now_934051cd9b3f4e91.md"
+    current.write_text("current")
+    path = th.notes_file_for(str(tmp_path), "{title}_{id}", SESSION, "Now", None)
+    assert path == str(current)
+    assert (tmp_path / "Old_934051cd.md").read_text() == "legacy"  # left alone
+
+
+def test_ambiguous_legacy_files_are_not_renamed(tmp_path):
+    a, b = tmp_path / "A_934051cd.md", tmp_path / "B_934051cd.md"
+    a.write_text("a")
+    b.write_text("b")
+    os.utime(a, (1_000_000, 1_000_000))
+    assert th.notes_file_for(str(tmp_path), "{title}_{id}", SESSION, "New", None) == str(b)
+    assert sorted(os.listdir(tmp_path)) == ["A_934051cd.md", "B_934051cd.md"]
+
+
+def test_rename_without_hard_links_keeps_old_name(tmp_path, monkeypatch):
+    src, dst = tmp_path / "old.md", tmp_path / "new.md"
+    src.write_text("mine")
+
+    def no_links(a, b):
+        raise PermissionError("hard links not supported")
+
+    monkeypatch.setattr(th.os, "link", no_links)
+    assert th.rename_no_clobber(str(src), str(dst)) == str(src)
+    assert src.read_text() == "mine" and not dst.exists()
+
+
+def test_failed_append_leaves_no_partial_note(tmp_path, monkeypatch):
+    path = tmp_path / "n.md"
+    th.append_note(str(path), th.format_note(["one"], when=WHEN))
+    before = path.read_bytes()
+
+    def disk_full(fd):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(th.os, "fsync", disk_full)
+    with pytest.raises(OSError):
+        th.append_note(str(path), th.format_note(["two " * 1000], when=WHEN))
+    assert path.read_bytes() == before
+
+
+def test_queued_action_after_close_is_cleaned_up(tmp_path, monkeypatch):
+    release = None
+
+    async def fake_run(*args, timeout=2):
+        if args[0] == "/usr/bin/pbpaste":
+            return "copied\n"
+        await release.wait()
+        return None
+
+    config = th.load_config(str(tmp_path / "missing.toml"))
+    config["notes_dir"] = str(tmp_path / "notes")
+    monkeypatch.setattr(th, "run", fake_run)
+    monkeypatch.setattr(th, "load_config", lambda: config)
+    notes = th.NoteTaker(connection=None)
+    session = FakeSession(str(tmp_path))
+
+    async def scenario():
+        nonlocal release
+        release = asyncio.Event()
+        first = asyncio.create_task(notes.save(session))
+        second = asyncio.create_task(notes.save(session))  # queued behind the first
+        while notes.active[SESSION] < 2:
+            await asyncio.sleep(0)
+        notes.forget(SESSION)
+        release.set()
+        await asyncio.gather(first, second)
+
+    asyncio.run(scenario())
+    [name] = os.listdir(tmp_path / "notes")
+    assert (tmp_path / "notes" / name).read_text().count("> copied") == 1
+    assert SESSION not in notes.last_clipboard
+    assert SESSION not in notes.locks and SESSION not in notes.active
+    assert not notes.closed
