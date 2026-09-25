@@ -714,7 +714,7 @@ def run_in_thread_while_locked(path, fn):
         fn()
         done.set()
 
-    with th.notes_lock(str(path)):
+    with th.notes_lock(str(path.parent)):
         thread = threading.Thread(target=target)
         thread.start()
         time.sleep(0.2)
@@ -751,3 +751,89 @@ def test_failed_rename_cleanup_is_reported(tmp_path, monkeypatch):
     monkeypatch.setattr(th.os, "remove", cannot_remove)
     with pytest.raises(OSError, match="both names now exist"):
         th.rename_no_clobber(str(src), str(dst))
+
+
+
+def test_save_resolves_the_file_inside_the_lock(tmp_path):
+    # Another process renames the tab's file (its title changed) while it
+    # holds the lock; a save waiting on the lock must use the new name.
+    import threading
+
+    old = tmp_path / "First_934051cd9b3f4e91.md"
+    old.write_text("## one\n\n")
+    result = {}
+    with th.notes_lock(str(tmp_path)):
+        thread = threading.Thread(target=lambda: result.update(path=th.save_note(
+            str(tmp_path), "{title}_{id}", SESSION, "Second", None, "## two\n\n")))
+        thread.start()
+        thread.join(0.2)
+        assert thread.is_alive()  # waiting for the lock
+        os.rename(old, tmp_path / "Second_934051cd9b3f4e91.md")
+    thread.join(5)
+    assert listdir(tmp_path) == ["Second_934051cd9b3f4e91.md"]
+    assert result["path"].endswith("Second_934051cd9b3f4e91.md")
+    assert (tmp_path / "Second_934051cd9b3f4e91.md").read_text() == "## one\n\n## two\n\n"
+
+
+def test_undo_resolves_the_file_inside_the_lock(tmp_path):
+    import threading
+
+    old = tmp_path / "First_934051cd9b3f4e91.md"
+    old.write_text("## one\n\n## two\n\n")
+    result = {}
+    with th.notes_lock(str(tmp_path)):
+        thread = threading.Thread(target=lambda: result.update(removed=th.undo_note(
+            str(tmp_path), "{title}_{id}", SESSION, "First", None)))
+        thread.start()
+        thread.join(0.2)
+        os.rename(old, tmp_path / "Renamed_934051cd9b3f4e91.md")
+    thread.join(5)
+    assert result["removed"]
+    assert (tmp_path / "First_934051cd9b3f4e91.md").read_text() == "## one\n\n"
+    assert listdir(tmp_path) == ["First_934051cd9b3f4e91.md"]
+
+
+def test_waiting_for_the_lock_does_not_block_other_work(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    async def fake_run(*args, timeout=2):
+        return None
+
+    config = th.load_config(str(tmp_path / "missing.toml"))
+    config["notes_dir"] = str(tmp_path / "notes")
+    monkeypatch.setattr(th, "run", fake_run)
+    monkeypatch.setattr(th, "load_config", lambda: config)
+    notes = th.NoteTaker(connection=None)
+
+    class Selected(FakeSession):
+        async def async_get_selection(self):
+            class Selection:
+                subSelections = ("x",)
+            return Selection()
+
+        async def async_get_selection_text(self, selection):
+            return "selected"
+
+    held = threading.Event()
+
+    def hold_lock():
+        with th.notes_lock(config["notes_dir"]):
+            held.set()
+            time.sleep(0.3)
+
+    async def scenario():
+        holder = threading.Thread(target=hold_lock)
+        holder.start()
+        held.wait(5)
+        ticks = 0
+        save = asyncio.create_task(notes.save(Selected(str(tmp_path))))
+        while not save.done():
+            ticks += 1
+            await asyncio.sleep(0.01)
+        await save
+        holder.join()
+        return ticks
+
+    assert asyncio.run(scenario()) > 5  # the event loop kept running
+    assert len(listdir(tmp_path / "notes")) == 1

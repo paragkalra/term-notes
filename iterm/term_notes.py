@@ -234,15 +234,17 @@ def format_note(lines, *, when, title=None, cwd=None, git=None, comment=None):
 
 
 @contextlib.contextmanager
-def notes_lock(notes_file):
-    """Exclusive lock shared by every append and undo in the notes folder.
+def notes_lock(notes_dir):
+    """Exclusive lock shared by every lookup, rename, append and undo in the
+    notes folder (not reentrant: code holding it calls the _ helpers).
 
     It's a separate file, so undo replacing the notes file (a new inode)
     can't slip past it. It only coordinates term-notes' iTerm2 processes;
-    see "Concurrency" in the README.
+    see "Concurrency" in the README. It blocks, so async code takes it in a
+    worker thread (asyncio.to_thread).
     """
-    fd = os.open(os.path.join(os.path.dirname(notes_file), ".term-notes.lock"),
-                 os.O_RDWR | os.O_CREAT, 0o666)
+    os.makedirs(notes_dir, exist_ok=True)
+    fd = os.open(os.path.join(notes_dir, ".term-notes.lock"), os.O_RDWR | os.O_CREAT, 0o666)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
@@ -259,9 +261,30 @@ def append_note(notes_file, note):
     lock, the rollback only happens if nothing but our own bytes follow the
     original end of file.
     """
-    os.makedirs(os.path.dirname(notes_file), exist_ok=True)
-    with notes_lock(notes_file):
+    with notes_lock(os.path.dirname(notes_file)):
         _append_note(notes_file, note.encode("utf-8"))
+
+
+# Each of these holds the lock across finding (and possibly renaming) the
+# tab's file *and* using it, so another process can't rename it in between.
+
+def save_note(notes_dir, template, session_id, title, cwd, note):
+    """Append note to the tab's notes file; returns its path."""
+    with notes_lock(notes_dir):
+        notes_file = notes_file_for(notes_dir, template, session_id, title, cwd)
+        _append_note(notes_file, note.encode("utf-8"))
+        return notes_file
+
+
+def undo_note(notes_dir, template, session_id, title, cwd):
+    """Remove the last note from the tab's notes file; True if one was removed."""
+    with notes_lock(notes_dir):
+        return _remove_last_note(notes_file_for(notes_dir, template, session_id, title, cwd))
+
+
+def locked_notes_file(notes_dir, template, session_id, title, cwd):
+    with notes_lock(notes_dir):
+        return notes_file_for(notes_dir, template, session_id, title, cwd)
 
 
 def _append_note(notes_file, data):
@@ -304,7 +327,7 @@ def remove_last_note(notes_file):
     """
     if not os.path.exists(notes_file):
         return False
-    with notes_lock(notes_file):
+    with notes_lock(os.path.dirname(notes_file)):
         return _remove_last_note(notes_file)
 
 
@@ -521,11 +544,13 @@ class NoteTaker:
         title = await session.tab.async_get_variable("title") if session.tab else None
         return title or await session.async_get_variable("name")
 
-    async def notes_file(self, session, config):
+    async def locked(self, fn, session, config, *args):
+        """Run fn(notes_dir, template, session_id, title, cwd, *args) in a
+        worker thread, since it waits for the notes lock."""
         title = await self.tab_title(session)
         cwd = await session.async_get_variable("path")
-        return notes_file_for(config["notes_dir"], config["file_name"],
-                              session.session_id, title, cwd)
+        return await asyncio.to_thread(fn, config["notes_dir"], config["file_name"],
+                                       session.session_id, title, cwd, *args)
 
     async def save(self, session, ask_comment=False):
         await self.exclusive(session.session_id, lambda: self._save(session, ask_comment))
@@ -550,11 +575,9 @@ class NoteTaker:
         title = await self.tab_title(session)
         cwd = await session.async_get_variable("path")
         git = await git_context(cwd) if config["git_context"] else None
-        notes_file = notes_file_for(config["notes_dir"], config["file_name"],
-                                    session.session_id, title, cwd)
-        append_note(notes_file, format_note(
-            lines, when=datetime.datetime.now(), title=title, cwd=cwd, git=git,
-            comment=comment))
+        note = format_note(lines, when=datetime.datetime.now(), title=title, cwd=cwd,
+                           git=git, comment=comment)
+        notes_file = await self.locked(save_note, session, config, note)
         # Only now that the note is on disk, so a failed save can be retried.
         if from_clipboard:
             self.last_clipboard[session.session_id] = digest(text)
@@ -565,7 +588,7 @@ class NoteTaker:
 
     async def _undo(self, session):
         config = load_config()
-        if not remove_last_note(await self.notes_file(session, config)):
+        if not await self.locked(undo_note, session, config):
             log.info("no notes to undo")
             return
         # Let the same clipboard text be saved again after undoing it.
@@ -574,7 +597,7 @@ class NoteTaker:
 
     async def open_notes(self, session):
         config = load_config()
-        notes_file = await self.notes_file(session, config)
+        notes_file = await self.locked(locked_notes_file, session, config)
         if not os.path.exists(notes_file):
             await self.alert(session, "No notes yet", "Select some text in this tab and save it first.")
             return
