@@ -837,3 +837,32 @@ def test_waiting_for_the_lock_does_not_block_other_work(tmp_path, monkeypatch):
 
     assert asyncio.run(scenario()) > 5  # the event loop kept running
     assert len(listdir(tmp_path / "notes")) == 1
+
+
+
+def test_note_and_file_name_use_the_same_title(tmp_path, monkeypatch):
+    async def fake_run(*args, timeout=2):
+        return "copied\n" if args[0] == "/usr/bin/pbpaste" else None
+
+    config = th.load_config(str(tmp_path / "missing.toml"))
+    config["notes_dir"] = str(tmp_path / "notes")
+    monkeypatch.setattr(th, "run", fake_run)
+    monkeypatch.setattr(th, "load_config", lambda: config)
+
+    class ChangingTitle(FakeSession):
+        """The title changes after it is first read, e.g. during the git lookup."""
+
+        def __init__(self, cwd):
+            super().__init__(cwd)
+            titles = iter(["First", "Second", "Third"])
+
+            class Tab:
+                async def async_get_variable(self, name):
+                    return next(titles)
+
+            self.tab = Tab()
+
+    asyncio.run(th.NoteTaker(connection=None).save(ChangingTitle(str(tmp_path))))
+    [name] = listdir(tmp_path / "notes")
+    assert name.startswith("First_")
+    assert "· First" in (tmp_path / "notes" / name).read_text()

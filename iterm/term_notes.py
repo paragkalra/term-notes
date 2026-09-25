@@ -544,11 +544,15 @@ class NoteTaker:
         title = await session.tab.async_get_variable("title") if session.tab else None
         return title or await session.async_get_variable("name")
 
-    async def locked(self, fn, session, config, *args):
+    async def context(self, session):
+        """The tab's (title, cwd), read once per action so the note and its
+        file name always agree."""
+        return await self.tab_title(session), await session.async_get_variable("path")
+
+    async def locked(self, fn, session, config, context, *args):
         """Run fn(notes_dir, template, session_id, title, cwd, *args) in a
         worker thread, since it waits for the notes lock."""
-        title = await self.tab_title(session)
-        cwd = await session.async_get_variable("path")
+        title, cwd = context
         return await asyncio.to_thread(fn, config["notes_dir"], config["file_name"],
                                        session.session_id, title, cwd, *args)
 
@@ -572,12 +576,11 @@ class NoteTaker:
             if comment is None:  # cancelled
                 return
 
-        title = await self.tab_title(session)
-        cwd = await session.async_get_variable("path")
+        title, cwd = context = await self.context(session)
         git = await git_context(cwd) if config["git_context"] else None
         note = format_note(lines, when=datetime.datetime.now(), title=title, cwd=cwd,
                            git=git, comment=comment)
-        notes_file = await self.locked(save_note, session, config, note)
+        notes_file = await self.locked(save_note, session, config, context, note)
         # Only now that the note is on disk, so a failed save can be retried.
         if from_clipboard:
             self.last_clipboard[session.session_id] = digest(text)
@@ -588,7 +591,7 @@ class NoteTaker:
 
     async def _undo(self, session):
         config = load_config()
-        if not await self.locked(undo_note, session, config):
+        if not await self.locked(undo_note, session, config, await self.context(session)):
             log.info("no notes to undo")
             return
         # Let the same clipboard text be saved again after undoing it.
@@ -597,7 +600,7 @@ class NoteTaker:
 
     async def open_notes(self, session):
         config = load_config()
-        notes_file = await self.locked(locked_notes_file, session, config)
+        notes_file = await self.locked(locked_notes_file, session, config, await self.context(session))
         if not os.path.exists(notes_file):
             await self.alert(session, "No notes yet", "Select some text in this tab and save it first.")
             return
