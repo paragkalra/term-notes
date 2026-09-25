@@ -21,15 +21,20 @@ def load_wezterm_plugin(home="/Users/me"):
 
     Returns (lua runtime, plugin module table, stub table, fake). Set
     fake["clipboard"] to control what the plugin reads from the clipboard,
-    add command names to fake["fail"] to make them fail, and read the
-    commands that ran from fake["calls"].
+    add command names to fake["fail"] to make them fail, set
+    fake["before"][command] to a function to run once when that command
+    runs (as if something else ran while it yielded), and read the commands
+    that ran from fake["calls"].
     """
     lua = lupa.LuaRuntime(unpack_returned_tuples=True)
-    fake = {"clipboard": None, "calls": [], "fail": set()}
+    fake = {"clipboard": None, "calls": [], "fail": set(), "before": {}}
 
     def run_child_process(args):
         argv = [args[i] for i in range(1, len(args) + 1)]
         fake["calls"].append(argv)
+        hook = fake["before"].pop(argv[0], None)
+        if hook:  # simulates other work running while this command yields
+            hook()
         if argv[0] in fake["fail"]:
             return False, "", "failed on purpose"
         if argv[0] in ("pbpaste", "wl-paste", "xclip"):

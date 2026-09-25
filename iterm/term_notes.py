@@ -136,6 +136,13 @@ def notes_file_for(notes_dir, template, session_id, title, cwd):
               "id": short_id(session_id)}
     wanted = os.path.join(notes_dir, render_name(template, fields) + ".md")
     if "{id}" not in template:
+        if not os.path.exists(wanted):
+            # This tab may have a file from the per-tab "{title}_{id}" naming
+            # (the default before 0.2): move it to the shared name.
+            old = (find_notes_files(notes_dir, "{title}_{id}", fields["id"])
+                   or find_notes_files(notes_dir, "{title}_{id}", fields["id"][:8]))
+            if len(old) == 1:
+                return rename_no_clobber(old[0], wanted)
         return wanted
     existing = find_notes_files(notes_dir, template, fields["id"])
     if not existing:
@@ -602,8 +609,13 @@ class NoteTaker:
         if not await self.locked(undo_note, session, config, await self.context(session)):
             log.info("no notes to undo")
             return
-        # Let the same clipboard text be saved again after undoing it.
-        self.last_clipboard.pop(session.session_id, None)
+        # Let the same clipboard text be saved again after undoing it. With a
+        # shared file the removed note may be another tab's, so forget every
+        # tab's (at worst, a tab may save the same clipboard text once more).
+        if "{id}" in config["file_name"]:
+            self.last_clipboard.pop(session.session_id, None)
+        else:
+            self.last_clipboard.clear()
         log.info("removed last note")
 
     async def open_notes(self, session):

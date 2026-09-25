@@ -896,3 +896,41 @@ def test_title_change_without_id_starts_a_new_file(tmp_path):
     th.save_note(str(tmp_path), "{title}", SESSION, "First", None, "## one\n\n")
     th.save_note(str(tmp_path), "{title}", SESSION, "Second", None, "## two\n\n")
     assert sorted(listdir(tmp_path)) == ["First.md", "Second.md"]  # nothing renamed
+
+
+
+@pytest.mark.parametrize("old_id", ["934051cd9b3f4e91", "934051cd"])
+def test_per_tab_file_is_migrated_to_the_shared_name(tmp_path, old_id):
+    (tmp_path / f"Old-title_{old_id}.md").write_text("## old note\n\n")
+    path = th.save_note(str(tmp_path), "{title}", SESSION, "New title", None, "## new\n\n")
+    assert listdir(tmp_path) == ["New-title.md"] and path.endswith("New-title.md")
+    assert (tmp_path / "New-title.md").read_text() == "## old note\n\n## new\n\n"
+
+
+def test_existing_shared_file_is_not_overwritten_by_migration(tmp_path):
+    (tmp_path / "Old_934051cd9b3f4e91.md").write_text("mine")
+    (tmp_path / "Shared.md").write_text("## theirs\n\n")
+    path = th.save_note(str(tmp_path), "{title}", SESSION, "Shared", None, "## new\n\n")
+    assert path.endswith("Shared.md")
+    assert (tmp_path / "Shared.md").read_text() == "## theirs\n\n## new\n\n"
+    assert (tmp_path / "Old_934051cd9b3f4e91.md").read_text() == "mine"
+
+
+def test_undo_in_a_shared_file_lets_every_tab_resave(tmp_path, monkeypatch):
+    async def fake_run(*args, timeout=2):
+        return "from tab one\n" if args[0] == "/usr/bin/pbpaste" else None
+
+    config = th.load_config(str(tmp_path / "missing.toml"))
+    config["notes_dir"] = str(tmp_path / "notes")
+    monkeypatch.setattr(th, "run", fake_run)
+    monkeypatch.setattr(th, "load_config", lambda: config)
+
+    class OtherTab(FakeSession):
+        session_id = "AAAA1111-2222-3333-4444-555566667777"
+
+    notes = th.NoteTaker(connection=None)
+    one, two = FakeSession(str(tmp_path)), OtherTab(str(tmp_path))
+    asyncio.run(notes.save(one))
+    asyncio.run(notes.undo(two))  # removes tab one's note (same title, same file)
+    asyncio.run(notes.save(one))  # tab one can save it again
+    assert "> from tab one" in (tmp_path / "notes" / "My-tab.md").read_text()

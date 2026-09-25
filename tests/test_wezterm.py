@@ -563,24 +563,19 @@ def test_failed_append_leaves_no_partial_note(wez, tmp_path):
 
 
 def test_overlapping_saves_in_a_pane_do_not_lose_notes(wez, tmp_path):
-    # rewrite() yields in `cp` in real WezTerm, so a second save can start in
-    # the middle of one. Simulate it by saving again from inside the first.
-    lua, plugin, _, _ = wez
+    # Commands yield in real WezTerm, so a second save can start in the
+    # middle of one. Simulate it by saving again while the first runs mkdir.
+    lua, plugin, _, fake = wez
     actions = plugin.actions(settings_for(lua, plugin, tmp_path))
     window, pane, state = make_pane(lua, selection="first", cwd=str(tmp_path))
     call(actions.save, window, pane)
-    nested = {"done": False}
-    real_cwd = pane.get_current_working_dir
 
-    def cwd_with_nested_save(p):
-        if not nested["done"]:
-            nested["done"] = True
-            state.selection = "nested"
-            call(actions.save, window, pane)
-            state.selection = "second"
-        return real_cwd(p)
+    def nested_save():
+        state.selection = "nested"
+        call(actions.save, window, pane)
+        state.selection = "second"
 
-    pane.get_current_working_dir = cwd_with_nested_save
+    fake["before"]["mkdir"] = nested_save
     state.selection = "second"
     call(actions.save, window, pane)
     [name] = os.listdir(tmp_path)
@@ -824,3 +819,51 @@ def test_default_groups_notes_by_tab_title(wez, tmp_path):
     assert os.listdir(tmp_path) == ["my-host-ssh.md"]
     content = (tmp_path / "my-host-ssh.md").read_text()
     assert "> one" in content and "> two" in content
+
+
+
+def shared_settings(lua, plugin, tmp_path):
+    return plugin.settings(lua.table_from({"notes_dir": str(tmp_path), "git_context": False}))
+
+
+def test_undo_and_save_from_panes_sharing_a_file_do_not_overlap(wez, tmp_path):
+    lua, plugin, _, fake = wez
+    actions = plugin.actions(shared_settings(lua, plugin, tmp_path))
+    w1, p1, s1 = make_pane(lua, pane_id=1, title="Shared", selection="one")
+    call(actions.save, w1, p1)
+    s1.selection = "two"
+    call(actions.save, w1, p1)
+    w2, p2, s2 = make_pane(lua, pane_id=2, title="Shared", selection="three")
+    # Pane 2 saves while pane 1's undo is copying the file.
+    fake["before"]["cp"] = lambda: call(actions.save, w2, p2)
+    call(actions.undo, w1, p1)
+    content = (tmp_path / "Shared.md").read_text()
+    assert "> one" in content and "> two" not in content
+    # Pane 2's note wasn't silently lost: it was turned away and can be retried.
+    assert "> three" not in content
+    assert "Still saving the previous note; try again" in list(s2.toasts.values())
+
+
+def test_per_pane_file_is_migrated_to_the_shared_name(wez, tmp_path):
+    lua, plugin, stub, _ = wez
+    stub.GLOBAL.term_notes_ids = lua.table_from({"1": "0123456789abcdef"})
+    (tmp_path / "Old-title_0123456789abcdef.md").write_text("## old note\n\n")
+    actions = plugin.actions(shared_settings(lua, plugin, tmp_path))
+    window, pane, _ = make_pane(lua, pane_id=1, title="New title", selection="new")
+    call(actions.open_notes, window, pane)  # finds the old notes right away
+    assert os.listdir(tmp_path) == ["New-title.md"]
+    call(actions.save, window, pane)
+    content = (tmp_path / "New-title.md").read_text()
+    assert content.startswith("## old note") and "> new" in content
+
+
+def test_undo_in_a_shared_file_lets_every_pane_resave(wez, tmp_path):
+    lua, plugin, _, fake = wez
+    actions = plugin.actions(shared_settings(lua, plugin, tmp_path))
+    w1, p1, _ = make_pane(lua, pane_id=1, title="Shared", selection="")
+    w2, p2, _ = make_pane(lua, pane_id=2, title="Shared", selection="")
+    fake["clipboard"] = "from pane one"
+    call(actions.save, w1, p1)
+    call(actions.undo, w2, p2)  # removes pane 1's note
+    call(actions.save, w1, p1)  # pane 1 can save it again
+    assert "> from pane one" in (tmp_path / "Shared.md").read_text()

@@ -339,6 +339,27 @@ local function file_exists(path)
   return false
 end
 
+-- Rename src to dst unless dst exists; returns the path now in use.
+-- os.rename would silently replace dst. `ln` fails if the destination
+-- exists, so link then unlink; if that isn't possible, keep the old name.
+local function rename_no_clobber(src, dst)
+  if not run { 'ln', src, dst } then
+    return src
+  end
+  if not os.remove(src) then
+    -- Both names would remain and make later lookups ambiguous: undo the
+    -- link and keep the old name.
+    if os.remove(dst) then
+      wezterm.log_warn('term-notes: could not rename ' .. src .. '; keeping its name')
+    else
+      wezterm.log_error('term-notes: could not rename ' .. src .. ' to ' .. dst
+        .. ', and could not remove ' .. dst .. ' again: both names now exist; delete one of them')
+    end
+    return src
+  end
+  return dst
+end
+
 -- The pane's notes file, renamed if the tab title changed.
 -- A save passes `context` ({ title = ..., cwd = ... }) so the file name uses
 -- exactly the values it records in the note, even nil ones (they could
@@ -354,7 +375,15 @@ function M.notes_file(config, pane, context)
   local fields = { title = M.slug(title), dir = M.slug(M.basename(cwd)), id = id }
   local wanted = config.notes_dir .. '/' .. M.render_name(config.file_name, fields) .. '.md'
   if not config.file_name:find('{id}', 1, true) then
-    return wanted -- shared by every pane with this title; nothing to rename
+    -- Shared by every pane with this title. This pane may have a file from
+    -- the per-pane "{title}_{id}" naming (the default before 0.2): move it.
+    if not file_exists(wanted) then
+      local ok, old = pcall(wezterm.glob, M.glob_escape(config.notes_dir) .. '/*_' .. id .. '.md')
+      if ok and #old == 1 then
+        return rename_no_clobber(old[1], wanted)
+      end
+    end
+    return wanted
   end
   local wildcard = M.render_name(config.file_name, { title = '*', dir = '*', id = id })
   local ok, existing = pcall(wezterm.glob, M.glob_escape(config.notes_dir) .. '/' .. wildcard .. '.md')
@@ -377,24 +406,7 @@ function M.notes_file(config, pane, context)
     wezterm.log_warn('term-notes: several notes files match this pane; using ' .. newest)
     return newest
   end
-  -- Never rename onto an existing file: os.rename would silently replace
-  -- it. `ln` fails if the destination exists, so link then unlink; if that
-  -- isn't possible, keep the old name.
-  if not run { 'ln', existing[1], wanted } then
-    return existing[1]
-  end
-  if not os.remove(existing[1]) then
-    -- Both names would remain and make later lookups ambiguous: undo the
-    -- link and keep the old name.
-    if os.remove(wanted) then
-      wezterm.log_warn('term-notes: could not rename ' .. existing[1] .. '; keeping its name')
-    else
-      wezterm.log_error('term-notes: could not rename ' .. existing[1] .. ' to ' .. wanted
-        .. ', and could not remove ' .. wanted .. ' again: both names now exist; delete one of them')
-    end
-    return existing[1]
-  end
-  return wanted
+  return rename_no_clobber(existing[1], wanted)
 end
 
 -- 64-bit FNV-1a, so per-pane state holds a number instead of a whole
@@ -551,20 +563,20 @@ local function append(path, content)
   return false
 end
 
--- pane id -> true while a save or undo is changing its notes file. rewrite
+-- notes file path -> true while a save or undo is changing it. Keyed by
+-- path, not pane, because panes with the same title share a file. rewrite
 -- yields (in `cp`), and an append overlapping a copy-and-rename would lose
 -- one of them, so a second one is turned away instead.
 local busy = {}
 
-local function exclusive(window, pane, fn, ...)
-  local id = pane_id(pane)
-  if busy[id] then
+local function exclusive(window, path, fn, ...)
+  if busy[path] then
     toast(window, 'Still saving the previous note; try again')
     return false
   end
-  busy[id] = true
+  busy[path] = true
   local ok, result = pcall(fn, ...)
-  busy[id] = nil
+  busy[path] = nil
   if not ok then
     error(result)
   end
@@ -577,31 +589,33 @@ local function write_note(config, window, pane, text, from_clipboard, comment)
   -- Read once, so the note and its file name always agree.
   local title, cwd = tab_title(pane), cwd_of(pane)
   local notes_file = M.notes_file(config, pane, { title = title, cwd = cwd })
-  run { 'mkdir', '-p', config.notes_dir }
-  local ok = append(notes_file, M.format_note(lines, {
-    when = os.date('%Y-%m-%d %H:%M'),
-    title = title,
-    cwd = cwd,
-    home = wezterm.home_dir,
-    git = config.git_context and git_context(cwd) or nil,
-    comment = comment,
-  }))
-  if not ok then
-    toast(window, 'Could not write ' .. notes_file)
-    return false
-  end
-  -- Only now that the note is on disk, so a failed save can be retried.
-  if from_clipboard then
-    last_clipboard[pane_id(pane)] = M.digest(text)
-  end
-  forget_closed_panes()
-  wezterm.log_info('term-notes: saved ' .. #lines .. ' line(s) to ' .. notes_file)
-  return true
+  return exclusive(window, notes_file, function()
+    run { 'mkdir', '-p', config.notes_dir }
+    local ok = append(notes_file, M.format_note(lines, {
+      when = os.date('%Y-%m-%d %H:%M'),
+      title = title,
+      cwd = cwd,
+      home = wezterm.home_dir,
+      git = config.git_context and git_context(cwd) or nil,
+      comment = comment,
+    }))
+    if not ok then
+      toast(window, 'Could not write ' .. notes_file)
+      return false
+    end
+    -- Only now that the note is on disk, so a failed save can be retried.
+    if from_clipboard then
+      last_clipboard[pane_id(pane)] = M.digest(text)
+    end
+    forget_closed_panes()
+    wezterm.log_info('term-notes: saved ' .. #lines .. ' line(s) to ' .. notes_file)
+    return true
+  end)
 end
 
 -- write_note, always releasing the pending clipboard claim, even on error.
 local function save(config, window, pane, text, from_clipboard, comment)
-  local ok, result = pcall(exclusive, window, pane, write_note, config, window, pane, text, from_clipboard, comment)
+  local ok, result = pcall(write_note, config, window, pane, text, from_clipboard, comment)
   release(pane, from_clipboard)
   if not ok then
     error(result)
@@ -659,8 +673,7 @@ function M.actions(config)
     pane:split { direction = 'Right', args = args }
   end)
 
-  local function undo(window, pane)
-    local notes_file = M.notes_file(config, pane)
+  local function undo(window, pane, notes_file)
     local f = io.open(notes_file, 'r')
     local remaining = f and M.without_last_note(f:read('a'))
     if f then
@@ -679,12 +692,22 @@ function M.actions(config)
       toast(window, 'Could not remove ' .. notes_file)
       return
     end
-    last_clipboard[pane_id(pane)] = nil
+    -- Let the same clipboard text be saved again after undoing it. With a
+    -- shared file the removed note may be another pane's, so forget every
+    -- pane's (at worst, a pane may save the same clipboard text once more).
+    if config.file_name:find('{id}', 1, true) then
+      last_clipboard[pane_id(pane)] = nil
+    else
+      for id in pairs(last_clipboard) do
+        last_clipboard[id] = nil
+      end
+    end
     toast(window, 'Removed last note')
   end
 
   actions.undo = wezterm.action_callback(function(window, pane)
-    exclusive(window, pane, undo, window, pane)
+    local notes_file = M.notes_file(config, pane)
+    exclusive(window, notes_file, undo, window, pane, notes_file)
   end)
 
   return actions
