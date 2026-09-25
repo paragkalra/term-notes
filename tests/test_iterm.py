@@ -663,3 +663,35 @@ def test_open_in_app_failure_shows_an_alert(tmp_path, monkeypatch):
     asyncio.run(Notes(connection=None).perform("open_notes", FakeSession(str(tmp_path))))
     [(title, message)] = alerts
     assert title == "term-notes: open notes failed" and "/usr/bin/open" in message
+
+
+
+def test_rollback_never_discards_another_writers_append(tmp_path, monkeypatch):
+    path = tmp_path / "n.md"
+    th.append_note(str(path), th.format_note(["one"], when=WHEN))
+
+    def other_writer_then_disk_full(fd):
+        with open(path, "a") as other:  # another process appends meanwhile
+            other.write("## their note\n\n")
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(th.os, "fsync", other_writer_then_disk_full)
+    with pytest.raises(OSError):
+        th.append_note(str(path), th.format_note(["two"], when=WHEN))
+    assert "## their note" in path.read_text()
+
+
+def test_rename_undoes_link_when_source_cannot_be_removed(tmp_path, monkeypatch):
+    src, dst = tmp_path / "old.md", tmp_path / "new.md"
+    src.write_text("mine")
+    real_remove = os.remove
+
+    def remove(p):
+        if p == str(src):
+            raise PermissionError("Operation not permitted")
+        real_remove(p)
+
+    monkeypatch.setattr(th.os, "remove", remove)
+    assert th.rename_no_clobber(str(src), str(dst)) == str(src)
+    assert os.listdir(tmp_path) == ["old.md"]  # no second name left behind
+    assert src.read_text() == "mine"

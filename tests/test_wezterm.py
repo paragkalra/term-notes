@@ -713,3 +713,34 @@ def test_readme_lists_every_command_the_plugin_runs():
     for command in commands:
         assert f"`{command}`" in readme, command
     assert "/dev/null" in readme
+
+
+
+def test_rollback_never_discards_another_writers_append(wez, tmp_path):
+    lua, plugin, _, _ = wez
+    actions = plugin.actions(settings_for(lua, plugin, tmp_path))
+    window, pane, state = make_pane(lua, selection="one")
+    call(actions.save, window, pane)
+    [name] = os.listdir(tmp_path)
+    lua.execute("""
+        local real_open = io.open
+        io.open = function(path, mode)
+          local f, err = real_open(path, mode)
+          if not f or mode ~= 'a' then return f, err end
+          return {
+            seek = function(_, ...) return f:seek(...) end,
+            write = function(_, s)
+              f:write(s:sub(1, #s // 2)); f:flush()
+              local other = real_open(path, 'a')  -- another process appends
+              other:write('## their note\\n\\n'); other:close()
+              return nil, 'No space left on device'
+            end,
+            close = function() return f:close() end,
+          }
+        end
+    """)
+    state.selection = "two"
+    call(actions.save, window, pane)
+    # Our half-written note stays (it may end mid-character): rolling back
+    # would also have removed theirs.
+    assert b"## their note" in (tmp_path / name).read_bytes()

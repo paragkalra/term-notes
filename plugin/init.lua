@@ -505,8 +505,18 @@ local function append(path, content)
   if ok then
     return true
   end
-  if size then
+  -- Roll back only if nothing but our own bytes follow the original end of
+  -- file (plain Lua has no file locking), so this can never discard someone
+  -- else's append. The check re-reads the path dd will truncate.
+  local check = size and io.open(path, 'rb')
+  local tail = check and check:seek('set', size) and check:read(#content + 1) or ''
+  if check then
+    check:close()
+  end
+  if size and content:sub(1, #tail) == tail then
     run { 'dd', 'if=/dev/null', 'of=' .. path, 'bs=1', 'seek=' .. size }
+  elseif size then
+    wezterm.log_warn('term-notes: not rolling back ' .. path .. ': it changed during the write')
   end
   -- Plain Lua can't create a file exclusively, so "we created it" isn't
   -- certain: remove it only if it is still empty, which can never delete

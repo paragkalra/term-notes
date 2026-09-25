@@ -16,6 +16,7 @@ import asyncio
 import collections
 import contextlib
 import datetime
+import fcntl
 import glob
 import hashlib
 import logging
@@ -163,7 +164,15 @@ def rename_no_clobber(src, dst):
         # rename without them (check-then-rename races), so keep the old name.
         log.warning("not renaming %s to %s: %s", src, dst, e)
         return src
-    os.remove(src)
+    try:
+        os.remove(src)
+    except OSError as e:
+        # Both names would remain and make later lookups ambiguous: undo the
+        # link and keep the old name.
+        with contextlib.suppress(OSError):
+            os.remove(dst)
+        log.warning("not renaming %s to %s: %s", src, dst, e)
+        return src
     return dst
 
 
@@ -223,28 +232,43 @@ def format_note(lines, *, when, title=None, cwd=None, git=None, comment=None):
 
 def append_note(notes_file, note):
     """Append a note; on failure the file is cut back to its original size,
-    so a disk-full or interrupted write never leaves half a note behind."""
+    so a disk-full or interrupted write never leaves half a note behind.
+
+    The rollback only happens if nothing but our own bytes follow the original
+    end of file, so it can never discard someone else's append. An exclusive
+    flock also keeps two term-notes processes from interleaving appends.
+    """
     os.makedirs(os.path.dirname(notes_file), exist_ok=True)
+    data = note.encode("utf-8")
     # O_EXCL tells us atomically whether this call created the file, so the
     # cleanup below can never delete a file someone else just created.
     try:
-        fd = os.open(notes_file, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_EXCL, 0o666)
+        fd = os.open(notes_file, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_EXCL, 0o666)
         created = True
     except FileExistsError:
-        fd = os.open(notes_file, os.O_WRONLY | os.O_APPEND)
+        fd = os.open(notes_file, os.O_RDWR | os.O_APPEND)
         created = False
-    with os.fdopen(fd, "ab") as f:
-        size = f.seek(0, os.SEEK_END)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        size = os.lseek(fd, 0, os.SEEK_END)
         try:
-            f.write(note.encode("utf-8"))
-            f.flush()
-            os.fsync(f.fileno())
+            written = 0
+            while written < len(data):
+                written += os.write(fd, data[written:])
+            os.fsync(fd)
         except BaseException:
             with contextlib.suppress(OSError):
-                f.truncate(size)
-                if created:  # don't leave an empty file behind
-                    os.remove(notes_file)
+                # Only (part of) our own write after the original end?
+                tail = os.pread(fd, len(data) + 1, size)
+                if data.startswith(tail):
+                    os.ftruncate(fd, size)
+                    if created and size == 0:  # don't leave an empty file behind
+                        os.remove(notes_file)
+                else:
+                    log.warning("not rolling back %s: it changed during the write", notes_file)
             raise
+    finally:
+        os.close(fd)  # also releases the flock
 
 
 def remove_last_note(notes_file):
