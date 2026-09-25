@@ -410,7 +410,20 @@ end
 -- "<title>_<16 hex>.md" (after a restart, panes get new ids, so the id can't
 -- be relied on), plus this pane's own file under any title. Same rules as the
 -- iTerm2 script's legacy_files.
+-- Only files older than the migration marker (created the first time 0.2
+-- runs in the folder; shared with the iTerm2 script) count, so a file made
+-- after the upgrade is never mistaken for a legacy one.
+local MIGRATION_MARKER = '.term-notes-migration'
+
 local function legacy_files(notes_dir, title_slug, id)
+  local marker = notes_dir .. '/' .. MIGRATION_MARKER
+  if not file_exists(marker) then
+    local m = io.open(marker, 'a')
+    if not m then
+      return {} -- can't tell old from new files: don't migrate anything
+    end
+    m:close()
+  end
   local dir = M.glob_escape(notes_dir)
   local pattern = '^' .. title_slug:gsub('[%.%-]', '%%%0') .. '_' .. string.rep('[0-9a-f]', 16) .. '%.md$'
   local found, list = {}, {}
@@ -430,20 +443,23 @@ local function legacy_files(notes_dir, title_slug, id)
   for _, path in ipairs(ok_own and own or {}) do
     add(path)
   end
-  if #list > 1 then
-    local args = { 'ls', '-tr' } -- oldest first
-    for _, path in ipairs(list) do
-      args[#args + 1] = path
-    end
-    local sorted = {}
-    for line in (run(args) or ''):gmatch('[^\n]+') do
-      sorted[#sorted + 1] = line
-    end
-    if #sorted == #list then
-      list = sorted
-    end
+  if #list == 0 then
+    return list
   end
-  return list
+  -- Oldest first, with the marker in the listing: only what comes before it
+  -- predates the upgrade. (Plain Lua can't read modification times.)
+  local args = { 'ls', '-tr', marker }
+  for _, path in ipairs(list) do
+    args[#args + 1] = path
+  end
+  local older = {}
+  for line in (run(args) or ''):gmatch('[^\n]+') do
+    if line == marker then
+      return older
+    end
+    older[#older + 1] = line
+  end
+  return {} -- ls failed: don't migrate anything
 end
 
 -- Fold legacy per-pane files into the shared file (caller holds the guard).
@@ -454,14 +470,15 @@ function M.merge_legacy_files(notes_dir, wanted, title_slug, id)
     local merging = notes_dir .. '/.' .. M.basename(old) .. '.merging'
     if old ~= wanted and rename_no_clobber(old, merging) == merging then
       local f = io.open(merging, 'rb')
-      local data = f and f:read('a') or ''
+      local data = f and f:read('a')
       if f then
         f:close()
       end
-      if data:find('%S') and not data:find('\n\n$') then
+      if data and data:find('%S') and not data:find('\n\n$') then
         data = data:gsub('\n*$', '') .. '\n\n'
       end
-      if data:find('%S') and not append(wanted, data) then
+      if not data or (data:find('%S') and not append(wanted, data)) then
+        -- Never delete what couldn't be read or merged.
         wezterm.log_error('term-notes: could not merge ' .. old .. ' into ' .. wanted
           .. '; its notes are in ' .. merging)
       else

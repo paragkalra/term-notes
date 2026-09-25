@@ -15,8 +15,9 @@ WHEN = datetime.datetime(2026, 9, 24, 15, 43)
 
 
 def listdir(path):
-    """os.listdir without term-notes' lock file."""
-    return [name for name in os.listdir(path) if name != ".term-notes.lock"]
+    """os.listdir without term-notes' lock and migration marker files."""
+    return [name for name in os.listdir(path)
+            if name not in (".term-notes.lock", ".term-notes-migration")]
 
 
 @pytest.mark.parametrize("title, expected", [
@@ -902,6 +903,7 @@ def test_title_change_without_id_starts_a_new_file(tmp_path):
 @pytest.mark.parametrize("old_id", ["934051cd9b3f4e91", "934051cd"])
 def test_per_tab_file_is_migrated_to_the_shared_name(tmp_path, old_id):
     (tmp_path / f"Old-title_{old_id}.md").write_text("## old note\n\n")
+    os.utime(tmp_path / f"Old-title_{old_id}.md", (1_000_000, 1_000_000))  # before the upgrade
     path = th.save_note(str(tmp_path), "{title}", SESSION, "New title", None, "## new\n\n")
     assert listdir(tmp_path) == ["New-title.md"] and path.endswith("New-title.md")
     assert (tmp_path / "New-title.md").read_text() == "## old note\n\n## new\n\n"
@@ -910,6 +912,7 @@ def test_per_tab_file_is_migrated_to_the_shared_name(tmp_path, old_id):
 def test_migration_appends_to_an_existing_shared_file(tmp_path):
     (tmp_path / "Shared.md").write_text("## theirs\n\n")
     (tmp_path / "Old_934051cd9b3f4e91.md").write_text("## mine\n\n")
+    os.utime(tmp_path / "Old_934051cd9b3f4e91.md", (1_000_000, 1_000_000))  # before the upgrade
     path = th.save_note(str(tmp_path), "{title}", SESSION, "Shared", None, "## new\n\n")
     assert path.endswith("Shared.md") and listdir(tmp_path) == ["Shared.md"]
     assert (tmp_path / "Shared.md").read_text() == "## theirs\n\n## mine\n\n## new\n\n"
@@ -944,6 +947,7 @@ def test_same_title_legacy_files_are_merged_oldest_first(tmp_path):
     older.write_text("## older\n\n")
     newer.write_text("## newer\n\n")
     os.utime(older, (1_000_000, 1_000_000))
+    os.utime(newer, (2_000_000, 2_000_000))
     other_title = tmp_path / "Other_cccccccccccccccc.md"
     other_title.write_text("## other\n\n")
     looks_like_legacy = tmp_path / "Shared_20260925.md"  # a real title, not an 8-char id
@@ -957,6 +961,7 @@ def test_same_title_legacy_files_are_merged_oldest_first(tmp_path):
 def test_interrupted_merge_is_never_repeated(tmp_path, monkeypatch):
     legacy = tmp_path / "Shared_aaaaaaaaaaaaaaaa.md"
     legacy.write_text("## older\n\n")
+    os.utime(legacy, (1_000_000, 1_000_000))
     real_append = th._append_note
     calls = {"n": 0}
 
@@ -974,3 +979,15 @@ def test_interrupted_merge_is_never_repeated(tmp_path, monkeypatch):
     th.save_note(str(tmp_path), "{title}", SESSION, "Shared", None, "## new\n\n")
     assert (tmp_path / "Shared.md").read_text() == "## new\n\n"  # not merged twice
     assert kept.exists()
+
+
+
+def test_files_created_after_the_upgrade_are_never_merged(tmp_path):
+    # The first 0.2 save creates the migration marker ...
+    th.save_note(str(tmp_path), "{title}", SESSION, "Shared", None, "## first\n\n")
+    # ... so a later shared file whose title ends in 16 hex digits is its own file.
+    later = tmp_path / "Shared_aaaaaaaaaaaaaaaa.md"
+    later.write_text("## a different title\n\n")
+    th.save_note(str(tmp_path), "{title}", SESSION, "Shared", None, "## second\n\n")
+    assert later.read_text() == "## a different title\n\n"
+    assert (tmp_path / "Shared.md").read_text() == "## first\n\n## second\n\n"

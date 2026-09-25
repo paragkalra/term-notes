@@ -11,6 +11,11 @@ th = load_iterm_module()
 HOME = "/Users/me"
 
 
+def listdir(path):
+    """os.listdir without term-notes' migration marker file."""
+    return [name for name in os.listdir(path) if name != ".term-notes-migration"]
+
+
 @pytest.fixture
 def wez():
     return load_wezterm_plugin(home=HOME)
@@ -126,7 +131,7 @@ def test_old_wezterm_string_cwd_is_decoded(wez, tmp_path):
     uri = "file://host" + str(repo).replace(" ", "%20")
     pane.get_current_working_dir = lua.eval("function(uri) return function() return uri end end")(uri)
     call(actions.save, window, pane)
-    [name] = os.listdir(notes)
+    [name] = listdir(notes)
     assert name.startswith("my-repo_")
     content = (notes / name).read_text()
     assert "`myrepo`" not in content and "`my repo` @ `trunk`" in content
@@ -176,7 +181,7 @@ def test_save_writes_note_and_follows_title(wez, tmp_path):
     window, pane, state = make_pane(lua, tab_title="", title="✳ Claude Code",
                                     cwd=HOME + "/src", selection="  hello world  \n")
     call(actions.save, window, pane)
-    [first] = os.listdir(tmp_path)
+    [first] = listdir(tmp_path)
     assert first.startswith("Claude-Code_") and first.endswith(".md")
     content = (tmp_path / first).read_text()
     assert content.endswith("· ✳ Claude Code\n\n`~/src`\n\n> hello world\n\n")
@@ -184,7 +189,7 @@ def test_save_writes_note_and_follows_title(wez, tmp_path):
     state.title = "Fix login bug"
     state.selection = "second"
     call(actions.save, window, pane)
-    [renamed] = os.listdir(tmp_path)
+    [renamed] = listdir(tmp_path)
     assert renamed.startswith("Fix-login-bug_")
     assert (tmp_path / renamed).read_text().count("## ") == 2
 
@@ -194,7 +199,7 @@ def test_explicit_tab_title_wins(wez, tmp_path):
     actions = plugin.actions(settings_for(lua, plugin, tmp_path))
     window, pane, _ = make_pane(lua, tab_title="Notes tab", title="zsh", selection="x")
     call(actions.save, window, pane)
-    assert os.listdir(tmp_path)[0].startswith("Notes-tab_")
+    assert listdir(tmp_path)[0].startswith("Notes-tab_")
 
 
 def test_clipboard_fallback_and_dedupe(wez, tmp_path):
@@ -204,7 +209,7 @@ def test_clipboard_fallback_and_dedupe(wez, tmp_path):
     fake["clipboard"] = "copied by the app"
     call(actions.save, window, pane)
     call(actions.save, window, pane)  # same clipboard again: skipped
-    [name] = os.listdir(tmp_path)
+    [name] = listdir(tmp_path)
     assert (tmp_path / name).read_text().count("> copied by the app") == 1
     assert list(state.toasts.values()) == ["Nothing selected"]
 
@@ -216,7 +221,7 @@ def test_save_with_comment(wez, tmp_path):
     call(actions.save_with_comment, window, pane)
     assert state.prompt.action == "PromptInputLine"
     state.prompt.args.action.callback(window, pane, "my comment")
-    [name] = os.listdir(tmp_path)
+    [name] = listdir(tmp_path)
     assert (tmp_path / name).read_text().endswith("> the text\n\n**Comment:** my comment\n\n")
 
 
@@ -226,7 +231,7 @@ def test_save_with_comment_cancelled(wez, tmp_path):
     window, pane, state = make_pane(lua, selection="the text")
     call(actions.save_with_comment, window, pane)
     state.prompt.args.action.callback(window, pane, None)
-    assert os.listdir(tmp_path) == []
+    assert listdir(tmp_path) == []
 
 
 def test_undo(wez, tmp_path):
@@ -237,11 +242,11 @@ def test_undo(wez, tmp_path):
     state.selection = "two"
     call(actions.save, window, pane)
     call(actions.undo, window, pane)
-    [name] = os.listdir(tmp_path)
+    [name] = listdir(tmp_path)
     content = (tmp_path / name).read_text()
     assert "> one" in content and "> two" not in content
     call(actions.undo, window, pane)
-    assert os.listdir(tmp_path) == []
+    assert listdir(tmp_path) == []
     call(actions.undo, window, pane)
     assert list(state.toasts.values())[-1] == "No notes to undo"
 
@@ -253,7 +258,7 @@ def test_panes_get_separate_files(wez, tmp_path):
     w2, p2, _ = make_pane(lua, pane_id=2, title="Same", selection="b")
     call(actions.save, w1, p1)
     call(actions.save, w2, p2)
-    assert len(os.listdir(tmp_path)) == 2
+    assert len(listdir(tmp_path)) == 2
 
 
 def test_open_notes(wez, tmp_path):
@@ -282,7 +287,7 @@ def test_git_context(wez, tmp_path):
     actions = plugin.actions(plugin.settings(lua.table_from({"notes_dir": str(notes)})))
     window, pane, _ = make_pane(lua, cwd=str(repo), selection="x")
     call(actions.save, window, pane)
-    [name] = os.listdir(notes)
+    [name] = listdir(notes)
     assert "`myrepo` @ `trunk`" in (notes / name).read_text()
 
 
@@ -295,7 +300,7 @@ def test_undo_keeps_notes_when_rewrite_fails(wez, tmp_path):
     call(actions.save, window, pane)
     state.selection = "two"
     call(actions.save, window, pane)
-    [name] = os.listdir(tmp_path)
+    [name] = listdir(tmp_path)
     before = (tmp_path / name).read_text()
     tmp_path.chmod(0o555)  # the temp file can't be created
     try:
@@ -303,7 +308,7 @@ def test_undo_keeps_notes_when_rewrite_fails(wez, tmp_path):
     finally:
         tmp_path.chmod(0o755)
     assert (tmp_path / name).read_text() == before  # nothing lost
-    assert os.listdir(tmp_path) == [name]
+    assert listdir(tmp_path) == [name]
     assert list(state.toasts.values())[-1].startswith("Could not update")
 
 
@@ -312,12 +317,12 @@ def test_multiline_title_cannot_fake_a_note_boundary(wez, tmp_path):
     actions = plugin.actions(settings_for(lua, plugin, tmp_path))
     window, pane, state = make_pane(lua, title="plain", selection="one")
     call(actions.save, window, pane)
-    [name] = os.listdir(tmp_path)
+    [name] = listdir(tmp_path)
     first = (tmp_path / name).read_text()
     state.title, state.selection = "plain", "two"
     state.tab_title = "task\n## subtitle"
     call(actions.save, window, pane)
-    [name] = os.listdir(tmp_path)
+    [name] = listdir(tmp_path)
     call(actions.undo, window, pane)
     assert (tmp_path / name).read_text() == first
 
@@ -336,7 +341,7 @@ def test_clipboard_can_be_retried_after_failed_save(wez, tmp_path):
     working = plugin.actions(settings_for(lua, plugin, notes))
     call(working.save, window, pane)  # retry works: not treated as already saved
     call(working.save, window, pane)  # same clipboard again: skipped
-    [name] = os.listdir(notes)
+    [name] = listdir(notes)
     assert (notes / name).read_text().count("> copied by the app") == 1
 
 
@@ -358,7 +363,7 @@ def test_concurrent_save_cannot_duplicate_clipboard(wez, tmp_path):
 
     pane.get_current_working_dir = cwd_with_nested_save
     call(actions.save, window, pane)
-    [name] = os.listdir(tmp_path)
+    [name] = listdir(tmp_path)
     assert (tmp_path / name).read_text().count("> copied by the app") == 1
     assert "Nothing selected" in list(state.toasts.values())
 
@@ -376,7 +381,7 @@ def test_cancelled_comment_releases_clipboard(wez, tmp_path):
     call(actions.save_with_comment, window, pane)
     state.prompt.args.action.callback(window, pane, None)  # Esc
     call(actions.save, window, pane)
-    [name] = os.listdir(tmp_path)
+    [name] = listdir(tmp_path)
     assert "> copied by the app" in (tmp_path / name).read_text()
 
 
@@ -387,7 +392,7 @@ def test_undo_preserves_permissions_and_existing_tmp(wez, tmp_path):
     call(actions.save, window, pane)
     state.selection = "two"
     call(actions.save, window, pane)
-    [name] = os.listdir(tmp_path)
+    [name] = listdir(tmp_path)
     notes = tmp_path / name
     notes.chmod(0o600)
     stray = tmp_path / (name + ".tmp")
@@ -396,7 +401,7 @@ def test_undo_preserves_permissions_and_existing_tmp(wez, tmp_path):
     assert "> two" not in notes.read_text()
     assert notes.stat().st_mode & 0o777 == 0o600
     assert stray.read_text() == "someone else's file"
-    assert sorted(os.listdir(tmp_path)) == sorted([name, stray.name])
+    assert sorted(listdir(tmp_path)) == sorted([name, stray.name])
 
 
 def test_windows_adds_no_shortcuts(wez):
@@ -426,14 +431,14 @@ def test_ambiguous_matches_are_not_renamed(wez, tmp_path):
     actions = plugin.actions(settings_for(lua, plugin, tmp_path))
     window, pane, state = make_pane(lua, title="First", selection="a")
     call(actions.save, window, pane)
-    [first] = os.listdir(tmp_path)
+    [first] = listdir(tmp_path)
     suffix = first.split("_")[-1]
     older = tmp_path / ("Stray_" + suffix)
     older.write_text("stray")
     os.utime(older, (1_000_000, 1_000_000))
     state.title, state.selection = "Renamed", "b"
     call(actions.save, window, pane)
-    assert sorted(os.listdir(tmp_path)) == sorted([first, older.name])  # nothing renamed or lost
+    assert sorted(listdir(tmp_path)) == sorted([first, older.name])  # nothing renamed or lost
     assert "> b" in (tmp_path / first).read_text()  # written to the newest match
     assert older.read_text() == "stray"
 
@@ -473,7 +478,7 @@ def test_notes_dir_with_glob_characters(wez, tmp_path):
     call(actions.save, window, pane)
     state.title, state.selection = "Second", "b"
     call(actions.save, window, pane)
-    [name] = os.listdir(notes)  # renamed, not a second file
+    [name] = listdir(notes)  # renamed, not a second file
     assert name.startswith("Second_")
     assert (notes / name).read_text().count("## ") == 2
 
@@ -486,7 +491,7 @@ def test_pane_ids_are_64_bit(wez, tmp_path):
     for pane_id in range(1, 6):
         window, pane, _ = make_pane(lua, pane_id=pane_id, title="Same", selection="x")
         call(actions.save, window, pane)
-    for name in os.listdir(tmp_path):
+    for name in listdir(tmp_path):
         suffix = name.removesuffix(".md").split("_")[-1]
         assert len(suffix) == 16 and int(suffix, 16) >= 0
         names.add(suffix)
@@ -539,7 +544,7 @@ def test_failed_append_leaves_no_partial_note(wez, tmp_path):
     actions = plugin.actions(settings_for(lua, plugin, tmp_path))
     window, pane, state = make_pane(lua, selection="one")
     call(actions.save, window, pane)
-    [name] = os.listdir(tmp_path)
+    [name] = listdir(tmp_path)
     before = (tmp_path / name).read_text()
 
     # Make appends write half their data and then report disk full.
@@ -558,7 +563,7 @@ def test_failed_append_leaves_no_partial_note(wez, tmp_path):
     state.selection = "two " * 100
     call(actions.save, window, pane)
     assert (tmp_path / name).read_text() == before
-    assert os.listdir(tmp_path) == [name]  # temp file cleaned up
+    assert listdir(tmp_path) == [name]  # temp file cleaned up
     assert list(state.toasts.values())[-1].startswith("Could not write")
 
 
@@ -578,7 +583,7 @@ def test_overlapping_saves_in_a_pane_do_not_lose_notes(wez, tmp_path):
     fake["before"]["mkdir"] = nested_save
     state.selection = "second"
     call(actions.save, window, pane)
-    [name] = os.listdir(tmp_path)
+    [name] = listdir(tmp_path)
     content = (tmp_path / name).read_text()
     assert "> first" in content and "> second" in content
     assert "Still saving the previous note; try again" in list(state.toasts.values())
@@ -595,7 +600,7 @@ def test_save_writes_only_the_new_note(wez, tmp_path):
         state.selection = f"note {i}"
         call(actions.save, window, pane)
     assert not [c for c in fake["calls"] if c[0] in ("cp", "dd")]  # no whole-file copies
-    [name] = os.listdir(tmp_path)
+    [name] = listdir(tmp_path)
     assert (tmp_path / name).read_text().count("## ") == 4
 
 
@@ -616,7 +621,7 @@ def test_failed_first_append_leaves_no_file(wez, tmp_path):
     """)
     window, pane, _ = make_pane(lua, selection="first ever note")
     call(actions.save, window, pane)
-    assert os.listdir(tmp_path) == []
+    assert listdir(tmp_path) == []
 
 
 def test_undo_of_only_note_reports_failed_delete(wez, tmp_path):
@@ -625,13 +630,13 @@ def test_undo_of_only_note_reports_failed_delete(wez, tmp_path):
     window, pane, state = make_pane(lua, selection="")
     fake["clipboard"] = "only note"
     call(actions.save, window, pane)
-    [name] = os.listdir(tmp_path)
+    [name] = listdir(tmp_path)
     tmp_path.chmod(0o555)  # the file can't be deleted
     try:
         call(actions.undo, window, pane)
     finally:
         tmp_path.chmod(0o755)
-    assert os.listdir(tmp_path) == [name]
+    assert listdir(tmp_path) == [name]
     assert list(state.toasts.values())[-1].startswith("Could not remove")
     assert plugin._state.last_clipboard["1"] is not None  # state unchanged
 
@@ -641,11 +646,11 @@ def test_rename_keeps_old_name_when_no_safe_rename(wez, tmp_path):
     actions = plugin.actions(settings_for(lua, plugin, tmp_path))
     window, pane, state = make_pane(lua, title="First", selection="a")
     call(actions.save, window, pane)
-    [first] = os.listdir(tmp_path)
+    [first] = listdir(tmp_path)
     fake["fail"].add("ln")  # no atomic no-replace rename available
     state.title, state.selection = "Second", "b"
     call(actions.save, window, pane)
-    assert os.listdir(tmp_path) == [first]  # kept the old name, didn't overwrite
+    assert listdir(tmp_path) == [first]  # kept the old name, didn't overwrite
     assert (tmp_path / first).read_text().count("## ") == 2
 
 
@@ -674,7 +679,7 @@ def test_failed_append_never_deletes_a_file_someone_else_created(wez, tmp_path):
     """)
     window, pane, _ = make_pane(lua, selection="mine")
     call(actions.save, window, pane)
-    [name] = os.listdir(tmp_path)
+    [name] = listdir(tmp_path)
     assert (tmp_path / name).read_text() == "another process's notes\n"
 
 
@@ -683,7 +688,7 @@ def test_rename_rolls_back_when_old_name_cannot_be_removed(wez, tmp_path):
     actions = plugin.actions(settings_for(lua, plugin, tmp_path))
     window, pane, state = make_pane(lua, title="First", selection="a")
     call(actions.save, window, pane)
-    [first] = os.listdir(tmp_path)
+    [first] = listdir(tmp_path)
     lua.execute("""
         local real_remove = os.remove
         os.remove = function(path)
@@ -693,7 +698,7 @@ def test_rename_rolls_back_when_old_name_cannot_be_removed(wez, tmp_path):
     """)
     state.title, state.selection = "Second", "b"
     call(actions.save, window, pane)
-    assert os.listdir(tmp_path) == [first]  # no second name left behind
+    assert listdir(tmp_path) == [first]  # no second name left behind
     assert (tmp_path / first).read_text().count("## ") == 2
     assert any("could not rename" in msg for msg in stub.logs.values())
 
@@ -719,7 +724,7 @@ def test_rollback_never_discards_another_writers_append(wez, tmp_path):
     actions = plugin.actions(settings_for(lua, plugin, tmp_path))
     window, pane, state = make_pane(lua, selection="one")
     call(actions.save, window, pane)
-    [name] = os.listdir(tmp_path)
+    [name] = listdir(tmp_path)
     lua.execute("""
         local real_open = io.open
         io.open = function(path, mode)
@@ -779,7 +784,7 @@ def test_note_and_file_name_use_the_same_title(wez, tmp_path):
         end
     """)()
     call(actions.save, window, pane)
-    [name] = os.listdir(tmp_path)
+    [name] = listdir(tmp_path)
     assert name.startswith("First_")  # settings_for uses {title}_{id}
     assert "· First" in (tmp_path / name).read_text()
 
@@ -802,7 +807,7 @@ def test_captured_nil_cwd_is_kept(wez, tmp_path):
         end
     """)()
     call(actions.save, window, pane)
-    [name] = os.listdir(tmp_path)
+    [name] = listdir(tmp_path)
     assert name.startswith("tab_")  # {dir} empty, like the note
     assert "project" not in (tmp_path / name).read_text()
 
@@ -816,7 +821,7 @@ def test_default_groups_notes_by_tab_title(wez, tmp_path):
     # A new pane (e.g. after reconnecting) with the same title.
     w2, p2, _ = make_pane(lua, pane_id=2, title="✳ my-host (ssh)", selection="two")
     call(actions.save, w2, p2)
-    assert os.listdir(tmp_path) == ["my-host-ssh.md"]
+    assert listdir(tmp_path) == ["my-host-ssh.md"]
     content = (tmp_path / "my-host-ssh.md").read_text()
     assert "> one" in content and "> two" in content
 
@@ -848,10 +853,11 @@ def test_per_pane_file_is_migrated_to_the_shared_name(wez, tmp_path):
     lua, plugin, stub, _ = wez
     stub.GLOBAL.term_notes_ids = lua.table_from({"1": "0123456789abcdef"})
     (tmp_path / "Old-title_0123456789abcdef.md").write_text("## old note\n\n")
+    os.utime(tmp_path / "Old-title_0123456789abcdef.md", (1_000_000, 1_000_000))
     actions = plugin.actions(shared_settings(lua, plugin, tmp_path))
     window, pane, _ = make_pane(lua, pane_id=1, title="New title", selection="new")
     call(actions.open_notes, window, pane)  # finds the old notes right away
-    assert os.listdir(tmp_path) == ["New-title.md"]
+    assert listdir(tmp_path) == ["New-title.md"]
     call(actions.save, window, pane)
     content = (tmp_path / "New-title.md").read_text()
     assert content.startswith("## old note") and "> new" in content
@@ -891,6 +897,7 @@ def test_same_title_legacy_files_are_merged_after_a_restart(wez, tmp_path):
     older.write_text("## older\n\n")
     newer.write_text("## newer")  # missing the trailing blank line
     os.utime(older, (1_000_000, 1_000_000))
+    os.utime(newer, (2_000_000, 2_000_000))
     (tmp_path / "Other_cccccccccccccccc.md").write_text("## other\n\n")
     (tmp_path / "Shared_20260925.md").write_text("## report\n\n")
     actions = plugin.actions(shared_settings(lua, plugin, tmp_path))
@@ -899,4 +906,39 @@ def test_same_title_legacy_files_are_merged_after_a_restart(wez, tmp_path):
     content = (tmp_path / "Shared.md").read_text()
     assert content.startswith("## older\n\n## newer\n\n## ")
     assert content.index("## older") < content.index("## newer") < content.index("> new")
-    assert sorted(os.listdir(tmp_path)) == ["Other_cccccccccccccccc.md", "Shared.md", "Shared_20260925.md"]
+    assert sorted(listdir(tmp_path)) == ["Other_cccccccccccccccc.md", "Shared.md", "Shared_20260925.md"]
+
+
+
+def test_files_created_after_the_upgrade_are_never_merged(wez, tmp_path):
+    lua, plugin, _, _ = wez
+    actions = plugin.actions(shared_settings(lua, plugin, tmp_path))
+    window, pane, state = make_pane(lua, title="Shared", selection="first")
+    call(actions.save, window, pane)  # creates the migration marker
+    later = tmp_path / "Shared_aaaaaaaaaaaaaaaa.md"
+    later.write_text("## a different title\n\n")
+    os.utime(later, (4_000_000_000, 4_000_000_000))  # clearly after the marker
+    state.selection = "second"
+    call(actions.save, window, pane)
+    assert later.read_text() == "## a different title\n\n"
+    assert "## a different title" not in (tmp_path / "Shared.md").read_text()
+
+
+def test_unreadable_legacy_file_is_kept(wez, tmp_path):
+    lua, plugin, stub, _ = wez
+    legacy = tmp_path / "Shared_aaaaaaaaaaaaaaaa.md"
+    legacy.write_text("## precious\n\n")
+    os.utime(legacy, (1_000_000, 1_000_000))
+    lua.execute("""
+        local real_open = io.open
+        io.open = function(path, mode)
+          if path:find('%.merging$') and mode == 'rb' then return nil, 'Input/output error' end
+          return real_open(path, mode)
+        end
+    """)
+    actions = plugin.actions(shared_settings(lua, plugin, tmp_path))
+    window, pane, _ = make_pane(lua, title="Shared", selection="new")
+    call(actions.save, window, pane)
+    kept = tmp_path / ".Shared_aaaaaaaaaaaaaaaa.md.merging"
+    assert kept.read_text() == "## precious\n\n"
+    assert any("its notes are in" in msg for msg in stub.errors.values())

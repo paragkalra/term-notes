@@ -163,13 +163,30 @@ def legacy_files(notes_dir, title_slug, file_id):
     tab's own file under any title, including the older 8-character id.
     (Other 8-character suffixes aren't matched: "report_20260925" could be
     a real title.)
+
+    Only files older than the migration marker count, so a file created after
+    the upgrade -- say a shared file for a title that happens to end in 16
+    hex digits -- is never mistaken for a legacy one.
     """
+    since = migration_marker(notes_dir)
     pattern = re.compile(re.escape(title_slug) + r"_[0-9a-f]{16}\.md")
     found = {p for p in glob.glob(os.path.join(glob.escape(notes_dir), "*_*.md"))
              if pattern.fullmatch(os.path.basename(p))}
     for own_id in (file_id, file_id[:8]):
         found.update(find_notes_files(notes_dir, "{title}_{id}", own_id))
-    return sorted(found, key=os.path.getmtime)
+    return sorted((p for p in found if os.path.getmtime(p) < since), key=os.path.getmtime)
+
+
+MIGRATION_MARKER = ".term-notes-migration"
+
+
+def migration_marker(notes_dir):
+    """Modification time of the marker recording when 0.2 first ran in this
+    folder, creating it on first use. Shared with the WezTerm plugin."""
+    path = os.path.join(notes_dir, MIGRATION_MARKER)
+    with contextlib.suppress(FileExistsError):
+        os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666))
+    return os.path.getmtime(path)
 
 
 def merge_legacy_files(notes_dir, wanted, title_slug, file_id):

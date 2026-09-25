@@ -37,7 +37,9 @@ terminal: shells, SSH sessions, REPLs, log tails.
 
   **Upgrading from 0.1**, whose default was one file per tab
   (`Title_<id>.md`): the next time you save or open notes in a tab, older
-  files with the same title are merged into `Title.md`, oldest first.
+  files with the same title are merged into `Title.md`, oldest first. Only
+  files from before the upgrade are merged; a hidden `.term-notes-migration`
+  file in the notes folder records when that was.
 - **Keeps the text's shape.** Blank lines and indentation inside the
   selection are kept, so code and stack traces survive intact.
 - **Works with agent TUIs.** Claude Code, Codex and similar tools handle the
