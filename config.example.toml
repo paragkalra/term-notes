@@ -1,0 +1,30 @@
+# term-notes configuration for iTerm2.
+# Copy to ~/.config/term-notes/config.toml. Every setting is optional.
+# Changes apply on the next save, except [keys], which needs a script
+# restart (Scripts > Manage > Console > restart).
+# WezTerm users pass the same settings to apply_to_config() instead.
+
+# Where notes are written. One Markdown file per tab.
+notes_dir = "~/notes/term-notes"
+
+# File name for each tab's notes (".md" is added). Placeholders:
+#   {title}  the tab title, e.g. "Fix-login-bug"
+#   {dir}    the working directory's name when the note is saved
+#   {id}     a short id for the tab (required; added if missing)
+file_name = "{title}_{id}"
+
+# Add the git repo and branch of the working directory to each note.
+git_context = true
+
+# How the "open notes" shortcut shows notes: "split" (a pane running
+# split_command) or "app" (your default app for .md files).
+open_in = "split"
+split_command = "less -R +G"
+
+# Shortcuts: modifiers (ctrl, alt/opt, shift, cmd) plus a letter or digit.
+# Set one to "" to disable it.
+[keys]
+save = "ctrl+alt+h"
+save_with_comment = "ctrl+alt+shift+h"
+open_notes = "ctrl+alt+n"
+undo = "ctrl+alt+z"
