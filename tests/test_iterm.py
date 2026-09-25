@@ -14,6 +14,11 @@ SESSION = "934051CD-9B3F-4E91-AADF-EDB0803BADB9"
 WHEN = datetime.datetime(2026, 9, 24, 15, 43)
 
 
+def listdir(path):
+    """os.listdir without term-notes' lock file."""
+    return [name for name in os.listdir(path) if name != ".term-notes.lock"]
+
+
 @pytest.mark.parametrize("title, expected", [
     ("✳ iTerm highlight setup", "iTerm-highlight-setup"),
     ("⠐ Fix auth bug (PLAT-741)", "Fix-auth-bug-PLAT-741"),
@@ -223,7 +228,7 @@ def test_undo_keeps_notes_when_rewrite_fails(tmp_path, monkeypatch):
         th.remove_last_note(path)
     with open(path) as f:
         assert f.read() == original  # nothing lost
-    assert os.listdir(tmp_path) == ["n.md"]  # temp file cleaned up
+    assert listdir(tmp_path) == ["n.md"]  # temp file cleaned up
 
 
 @pytest.mark.parametrize("field", ["title", "cwd", "comment"])
@@ -302,7 +307,7 @@ def test_clipboard_can_be_retried_after_failed_save(tmp_path, monkeypatch):
     config["notes_dir"] = str(tmp_path / "notes")
     asyncio.run(notes.save(session))  # retry works: not treated as already saved
     asyncio.run(notes.save(session))  # same clipboard again: skipped
-    [name] = os.listdir(tmp_path / "notes")
+    [name] = listdir(tmp_path / "notes")
     assert name == "My-tab_934051cd9b3f4e91.md"
     assert (tmp_path / "notes" / name).read_text().count("> copied by the app") == 1
 
@@ -329,7 +334,7 @@ def test_undo_preserves_permissions_and_existing_tmp(tmp_path):
     assert th.remove_last_note(str(path))
     assert path.stat().st_mode & 0o777 == 0o600
     assert stray.read_text() == "someone else's file"
-    assert sorted(os.listdir(tmp_path)) == ["n.md", "n.md.tmp"]
+    assert sorted(listdir(tmp_path)) == ["n.md", "n.md.tmp"]
 
 
 def test_concurrent_saves_cannot_duplicate_clipboard(tmp_path, monkeypatch):
@@ -351,7 +356,7 @@ def test_concurrent_saves_cannot_duplicate_clipboard(tmp_path, monkeypatch):
         await asyncio.gather(notes.save(session), notes.save(session))
 
     asyncio.run(two_quick_presses())
-    [name] = os.listdir(tmp_path / "notes")
+    [name] = listdir(tmp_path / "notes")
     assert (tmp_path / "notes" / name).read_text().count("> copied by the app") == 1
 
 
@@ -411,7 +416,7 @@ def test_ambiguous_matches_are_not_renamed(tmp_path):
     os.utime(older, (1_000_000, 1_000_000))
     path = th.notes_file_for(str(tmp_path), "{title}_{id}", SESSION, "Brand new", None)
     assert path == str(newer)
-    assert sorted(os.listdir(tmp_path)) == [older.name, newer.name]  # nothing renamed or lost
+    assert sorted(listdir(tmp_path)) == [older.name, newer.name]  # nothing renamed or lost
 
 
 def test_failed_action_shows_an_alert(tmp_path, monkeypatch):
@@ -508,7 +513,7 @@ def test_session_closed_during_save_is_purged_afterwards(tmp_path, monkeypatch):
         await save
 
     asyncio.run(scenario())
-    assert os.listdir(tmp_path / "notes")  # the in-flight save still finished
+    assert listdir(tmp_path / "notes")  # the in-flight save still finished
     assert SESSION not in notes.last_clipboard
     assert SESSION not in notes.locks
     assert not notes.closed
@@ -531,7 +536,7 @@ def test_legacy_8_character_file_is_migrated(tmp_path):
     legacy.write_text("## old note\n\n")
     path = th.notes_file_for(str(tmp_path), "{title}_{id}", SESSION, "New title", None)
     assert os.path.basename(path) == "New-title_934051cd9b3f4e91.md"
-    assert os.listdir(tmp_path) == ["New-title_934051cd9b3f4e91.md"]
+    assert listdir(tmp_path) == ["New-title_934051cd9b3f4e91.md"]
     with open(path) as f:
         assert f.read() == "## old note\n\n"
 
@@ -551,7 +556,7 @@ def test_ambiguous_legacy_files_are_not_renamed(tmp_path):
     b.write_text("b")
     os.utime(a, (1_000_000, 1_000_000))
     assert th.notes_file_for(str(tmp_path), "{title}_{id}", SESSION, "New", None) == str(b)
-    assert sorted(os.listdir(tmp_path)) == ["A_934051cd.md", "B_934051cd.md"]
+    assert sorted(listdir(tmp_path)) == ["A_934051cd.md", "B_934051cd.md"]
 
 
 def test_rename_without_hard_links_keeps_old_name(tmp_path, monkeypatch):
@@ -608,7 +613,7 @@ def test_queued_action_after_close_is_cleaned_up(tmp_path, monkeypatch):
         await asyncio.gather(first, second)
 
     asyncio.run(scenario())
-    [name] = os.listdir(tmp_path / "notes")
+    [name] = listdir(tmp_path / "notes")
     assert (tmp_path / "notes" / name).read_text().count("> copied") == 1
     assert SESSION not in notes.last_clipboard
     assert SESSION not in notes.locks and SESSION not in notes.active
@@ -693,5 +698,56 @@ def test_rename_undoes_link_when_source_cannot_be_removed(tmp_path, monkeypatch)
 
     monkeypatch.setattr(th.os, "remove", remove)
     assert th.rename_no_clobber(str(src), str(dst)) == str(src)
-    assert os.listdir(tmp_path) == ["old.md"]  # no second name left behind
+    assert listdir(tmp_path) == ["old.md"]  # no second name left behind
     assert src.read_text() == "mine"
+
+
+
+def run_in_thread_while_locked(path, fn):
+    """Run fn in a thread while the notes lock is held; return (blocked, thread)."""
+    import threading
+    import time
+
+    done = threading.Event()
+
+    def target():
+        fn()
+        done.set()
+
+    with th.notes_lock(str(path)):
+        thread = threading.Thread(target=target)
+        thread.start()
+        time.sleep(0.2)
+        blocked = not done.is_set()
+    thread.join(5)
+    return blocked, done.is_set()
+
+
+def test_append_waits_for_the_notes_lock(tmp_path):
+    path = tmp_path / "n.md"
+    th.append_note(str(path), th.format_note(["one"], when=WHEN))
+    blocked, finished = run_in_thread_while_locked(
+        path, lambda: th.append_note(str(path), th.format_note(["two"], when=WHEN)))
+    assert blocked and finished
+    assert path.read_text().count("## ") == 2
+
+
+def test_undo_waits_for_the_notes_lock(tmp_path):
+    path = tmp_path / "n.md"
+    th.append_note(str(path), th.format_note(["one"], when=WHEN))
+    th.append_note(str(path), th.format_note(["two"], when=WHEN))
+    blocked, finished = run_in_thread_while_locked(path, lambda: th.remove_last_note(str(path)))
+    assert blocked and finished
+    assert "> one" in path.read_text() and "> two" not in path.read_text()
+
+
+def test_failed_rename_cleanup_is_reported(tmp_path, monkeypatch):
+    src, dst = tmp_path / "old.md", tmp_path / "new.md"
+    src.write_text("mine")
+
+    def cannot_remove(p):
+        raise PermissionError("Operation not permitted")
+
+    monkeypatch.setattr(th.os, "remove", cannot_remove)
+    with pytest.raises(OSError, match="both names now exist"):
+        th.rename_no_clobber(str(src), str(dst))

@@ -128,6 +128,20 @@ restart (**Scripts → Manage → Console**, then restart).
   iTerm2 do the selecting instead of the app. Both work.
 - **Search everything:** `rg -i "cookie" ~/notes/term-notes`.
 
+## Concurrency
+
+Notes files are meant to be written only by term-notes. iTerm2 saves and
+undos take an exclusive lock on `.term-notes.lock` in the notes folder, so
+several iTerm2 windows and script restarts never lose each other's notes.
+The WezTerm plugin can't take that lock (plain Lua has no file locking);
+within one WezTerm, a pane's saves and undos run one at a time.
+
+What isn't protected: editing a notes file in an editor, or saving from
+WezTerm and iTerm2 into the same notes folder at the same instant. An
+edit made while term-notes is writing can be lost, and a save that fails
+with a disk error at that moment can leave a partial note. Edit notes files
+when you aren't saving, or copy them elsewhere first.
+
 ## Limitations
 
 - In apps that capture the mouse without copying to the clipboard (vim with

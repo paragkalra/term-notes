@@ -169,8 +169,11 @@ def rename_no_clobber(src, dst):
     except OSError as e:
         # Both names would remain and make later lookups ambiguous: undo the
         # link and keep the old name.
-        with contextlib.suppress(OSError):
+        try:
             os.remove(dst)
+        except OSError:
+            raise OSError(f"couldn't rename {src} to {dst} ({e}), and couldn't remove "
+                          f"{dst} again: both names now exist; delete one of them") from e
         log.warning("not renaming %s to %s: %s", src, dst, e)
         return src
     return dst
@@ -230,16 +233,38 @@ def format_note(lines, *, when, title=None, cwd=None, git=None, comment=None):
     return "\n\n".join(parts) + "\n\n"
 
 
+@contextlib.contextmanager
+def notes_lock(notes_file):
+    """Exclusive lock shared by every append and undo in the notes folder.
+
+    It's a separate file, so undo replacing the notes file (a new inode)
+    can't slip past it. It only coordinates term-notes' iTerm2 processes;
+    see "Concurrency" in the README.
+    """
+    fd = os.open(os.path.join(os.path.dirname(notes_file), ".term-notes.lock"),
+                 os.O_RDWR | os.O_CREAT, 0o666)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)  # also releases the lock
+
+
 def append_note(notes_file, note):
     """Append a note; on failure the file is cut back to its original size,
     so a disk-full or interrupted write never leaves half a note behind.
 
-    The rollback only happens if nothing but our own bytes follow the original
-    end of file, so it can never discard someone else's append. An exclusive
-    flock also keeps two term-notes processes from interleaving appends.
+    Runs under notes_lock, so other term-notes processes can't append or undo
+    meanwhile. As a last line of defence against writers that don't take the
+    lock, the rollback only happens if nothing but our own bytes follow the
+    original end of file.
     """
     os.makedirs(os.path.dirname(notes_file), exist_ok=True)
-    data = note.encode("utf-8")
+    with notes_lock(notes_file):
+        _append_note(notes_file, note.encode("utf-8"))
+
+
+def _append_note(notes_file, data):
     # O_EXCL tells us atomically whether this call created the file, so the
     # cleanup below can never delete a file someone else just created.
     try:
@@ -249,7 +274,6 @@ def append_note(notes_file, note):
         fd = os.open(notes_file, os.O_RDWR | os.O_APPEND)
         created = False
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
         size = os.lseek(fd, 0, os.SEEK_END)
         try:
             written = 0
@@ -268,14 +292,23 @@ def append_note(notes_file, note):
                     log.warning("not rolling back %s: it changed during the write", notes_file)
             raise
     finally:
-        os.close(fd)  # also releases the flock
+        os.close(fd)
 
 
 def remove_last_note(notes_file):
     """Remove the last note from the file. Returns True if one was removed.
 
-    Notes start with a "## " line; quoted text and comments never do.
+    Notes start with a "## " line; quoted text and comments never do. Runs
+    under notes_lock, so it can't overwrite another term-notes process's
+    append between reading the file and replacing it.
     """
+    if not os.path.exists(notes_file):
+        return False
+    with notes_lock(notes_file):
+        return _remove_last_note(notes_file)
+
+
+def _remove_last_note(notes_file):
     if not os.path.exists(notes_file):
         return False
     with open(notes_file, encoding="utf-8") as f:

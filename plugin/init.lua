@@ -373,8 +373,12 @@ function M.notes_file(config, pane)
   if not os.remove(existing[1]) then
     -- Both names would remain and make later lookups ambiguous: undo the
     -- link and keep the old name.
-    os.remove(wanted)
-    wezterm.log_warn('term-notes: could not rename ' .. existing[1] .. '; keeping its name')
+    if os.remove(wanted) then
+      wezterm.log_warn('term-notes: could not rename ' .. existing[1] .. '; keeping its name')
+    else
+      wezterm.log_error('term-notes: could not rename ' .. existing[1] .. ' to ' .. wanted
+        .. ', and could not remove ' .. wanted .. ' again: both names now exist; delete one of them')
+    end
     return existing[1]
   end
   return wanted

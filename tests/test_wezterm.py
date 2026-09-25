@@ -744,3 +744,23 @@ def test_rollback_never_discards_another_writers_append(wez, tmp_path):
     # Our half-written note stays (it may end mid-character): rolling back
     # would also have removed theirs.
     assert b"## their note" in (tmp_path / name).read_bytes()
+
+
+
+def test_failed_rename_cleanup_is_reported(wez, tmp_path):
+    lua, plugin, stub, _ = wez
+    actions = plugin.actions(settings_for(lua, plugin, tmp_path))
+    window, pane, state = make_pane(lua, title="First", selection="a")
+    call(actions.save, window, pane)
+    lua.execute("""
+        local real_remove = os.remove
+        os.remove = function(path)
+          if path:find('/First_', 1, true) or path:find('/Second_', 1, true) then
+            return nil, 'Operation not permitted'
+          end
+          return real_remove(path)
+        end
+    """)
+    state.title, state.selection = "Second", "b"
+    call(actions.save, window, pane)
+    assert any("both names now exist" in msg for msg in stub.errors.values())
