@@ -3,6 +3,7 @@ import datetime
 import os
 import re
 import subprocess
+import typing
 
 import iterm2
 import pytest
@@ -269,6 +270,8 @@ class FakeSession:
 
     session_id = SESSION
     window = None
+    user_vars: typing.ClassVar[dict] = {}  # set by shell/term-notes.sh in real sessions
+    job = "zsh"
 
     def __init__(self, cwd):
         self.cwd = cwd
@@ -286,7 +289,9 @@ class FakeSession:
         return Selection()
 
     async def async_get_variable(self, name):
-        return {"path": self.cwd, "name": "zsh"}[name]
+        if name.startswith("user.term_notes_"):
+            return self.user_vars.get(name.removeprefix("user.term_notes_"))
+        return {"path": self.cwd, "name": "zsh", "jobName": self.job}.get(name)
 
 
 def test_clipboard_can_be_retried_after_failed_save(tmp_path, monkeypatch):
@@ -991,3 +996,82 @@ def test_files_created_after_the_upgrade_are_never_merged(tmp_path):
     th.save_note(str(tmp_path), "{title}", SESSION, "Shared", None, "## second\n\n")
     assert later.read_text() == "## a different title\n\n"
     assert (tmp_path / "Shared.md").read_text() == "## first\n\n## second\n\n"
+
+
+
+@pytest.mark.parametrize("title, cwd, expected", [
+    ("zsh", "/Users/me/platform", "platform"),
+    ("-zsh", "/Users/me/platform/", "platform"),
+    ("ssh", "pkbox:~/proj", "proj"),
+    ("✳ Claude Code", "/Users/me/platform", "Claude-Code"),
+    ("zsh", None, "zsh"),
+])
+def test_file_title_replaces_bare_shell_names(title, cwd, expected):
+    assert th.file_title(title, cwd) == expected
+
+
+def test_unnamed_tabs_get_directory_named_files(tmp_path):
+    path = th.save_note(str(tmp_path), "{title}", SESSION, "zsh", "/Users/me/platform", "## x\n\n")
+    assert os.path.basename(path) == "platform.md"
+
+
+REMOTE = {"host": "pkbox", "dir": "~/proj", "repo": "proj", "branch": "feat/x"}
+
+
+@pytest.mark.parametrize("user_vars, job, expected", [
+    (REMOTE, "ssh", ("pkbox:~/proj", ("proj", "feat/x"))),
+    (REMOTE, "/usr/bin/ssh", ("pkbox:~/proj", ("proj", "feat/x"))),
+    (REMOTE, "zsh", None),  # left the SSH session: stale, ignore
+    ({**REMOTE, "host": "my-mac"}, "zsh", ("~/proj", ("proj", "feat/x"))),  # snippet sourced locally
+    ({**REMOTE, "repo": "", "branch": ""}, "ssh", ("pkbox:~/proj", None)),
+    ({**REMOTE, "branch": ""}, "ssh", ("pkbox:~/proj", ("proj", "detached"))),
+    ({}, "ssh", None),
+    ({"host": "pkbox", "dir": " "}, "ssh", None),
+])
+def test_remote_place(user_vars, job, expected):
+    assert th.remote_place(user_vars, job, "My-Mac") == expected
+
+
+def test_note_from_ssh_session_records_remote_place(tmp_path, monkeypatch):
+    calls = []
+
+    async def fake_run(*args, timeout=2):
+        calls.append(args[0])
+        return "copied\n" if args[0] == "/usr/bin/pbpaste" else None
+
+    config = th.load_config(str(tmp_path / "missing.toml"))
+    config["notes_dir"] = str(tmp_path / "notes")
+    monkeypatch.setattr(th, "run", fake_run)
+    monkeypatch.setattr(th, "load_config", lambda: config)
+
+    class SSHTab(FakeSession):
+        user_vars: typing.ClassVar[dict] = REMOTE
+        job = "ssh"
+
+    asyncio.run(th.NoteTaker(connection=None).save(SSHTab("/Users/me")))
+    [name] = listdir(tmp_path / "notes")
+    content = (tmp_path / "notes" / name).read_text()
+    assert "`pkbox:~/proj` · `proj` @ `feat/x`" in content
+    assert "git" not in calls  # nothing looked up on the Mac
+
+
+def test_stale_remote_vars_fall_back_to_local(tmp_path, monkeypatch):
+    calls = []
+
+    async def fake_run(*args, timeout=2):
+        calls.append(args[0])
+        return "copied\n" if args[0] == "/usr/bin/pbpaste" else None
+
+    config = th.load_config(str(tmp_path / "missing.toml"))
+    config["notes_dir"] = str(tmp_path / "notes")
+    monkeypatch.setattr(th, "run", fake_run)
+    monkeypatch.setattr(th, "load_config", lambda: config)
+
+    class BackOnTheMac(FakeSession):
+        user_vars: typing.ClassVar[dict] = REMOTE
+        job = "zsh"
+
+    asyncio.run(th.NoteTaker(connection=None).save(BackOnTheMac(str(tmp_path))))
+    [name] = listdir(tmp_path / "notes")
+    assert "pkbox" not in (tmp_path / "notes" / name).read_text()
+    assert "git" in calls  # looked up locally instead

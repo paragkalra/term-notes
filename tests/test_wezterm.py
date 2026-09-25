@@ -960,3 +960,55 @@ def test_messages_show_in_the_tab_bar(wez, tmp_path):
     assert state.status == " term-notes: No notes to undo "
     second()
     assert state.status == ""
+
+
+
+@pytest.mark.parametrize("title, cwd", [
+    ("zsh", "/Users/me/platform"), ("-zsh", "/Users/me/platform/"), ("ssh", "pkbox:~/proj"),
+    ("✳ Claude Code", "/Users/me/platform"), ("zsh", None),
+])
+def test_file_title_matches_python(wez, title, cwd):
+    _, plugin, _, _ = wez
+    assert plugin.file_title(title, cwd) == th.file_title(title, cwd)
+
+
+REMOTE_VARS = {"term_notes_host": "pkbox", "term_notes_dir": "~/proj",
+               "term_notes_repo": "proj", "term_notes_branch": "feat/x"}
+
+
+@pytest.mark.parametrize("user_vars, job", [
+    (REMOTE_VARS, "ssh"), (REMOTE_VARS, "/usr/bin/ssh"), (REMOTE_VARS, "zsh"),
+    ({**REMOTE_VARS, "term_notes_host": "my-mac"}, "zsh"),
+    ({**REMOTE_VARS, "term_notes_repo": "", "term_notes_branch": ""}, "ssh"),
+    ({**REMOTE_VARS, "term_notes_branch": ""}, "ssh"), ({}, "ssh"),
+])
+def test_remote_place_matches_python(wez, user_vars, job):
+    lua, plugin, _, _ = wez
+    result = plugin.remote_place(lua.table_from(user_vars), job, "My-Mac")
+    cwd, git = result if isinstance(result, tuple) else (result, None)  # a lone nil is None
+    expected = th.remote_place({k.removeprefix("term_notes_"): v for k, v in user_vars.items()},
+                               job, "My-Mac")
+    got = None if cwd is None else (cwd, tuple(git.values()) if git else None)
+    assert got == expected
+
+
+def test_note_from_ssh_pane_records_remote_place(wez, tmp_path):
+    lua, plugin, _, fake = wez
+    actions = plugin.actions(plugin.settings(lua.table_from({"notes_dir": str(tmp_path)})))
+    window, pane, _ = make_pane(lua, title="ssh", cwd="/Users/me", selection="from pkbox")
+    returning = lua.eval("function(t) return function() return t end end")
+    pane.get_user_vars = returning(lua.table_from(REMOTE_VARS))
+    pane.get_foreground_process_name = lua.eval("function() return '/usr/bin/ssh' end")
+    fake["calls"].clear()
+    call(actions.save, window, pane)
+    assert listdir(tmp_path) == ["proj.md"]  # "ssh" title: named after the remote dir
+    assert "`pkbox:~/proj` · `proj` @ `feat/x`" in (tmp_path / "proj.md").read_text()
+    assert not [c for c in fake["calls"] if c[0] == "git"]
+
+
+def test_unnamed_pane_gets_a_directory_named_file(wez, tmp_path):
+    lua, plugin, _, _ = wez
+    actions = plugin.actions(plugin.settings(lua.table_from({"notes_dir": str(tmp_path)})))
+    window, pane, _ = make_pane(lua, title="zsh", cwd="/Users/me/platform", selection="x")
+    call(actions.save, window, pane)
+    assert listdir(tmp_path) == ["platform.md"]

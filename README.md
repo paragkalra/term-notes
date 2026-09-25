@@ -32,7 +32,9 @@ terminal: shells, SSH sessions, REPLs, log tails.
 - **One notes file per tab title.** Notes go to a file named after the tab
   title, so reopening a tab or reconnecting an SSH session keeps adding to
   the same file. Agents like Claude Code set the title to the current task,
-  so file names describe what you were doing. Prefer one file per tab that
+  so file names describe what you were doing. A tab whose title is just a
+  shell name (`zsh`, `bash`, `ssh`...) uses its directory's name instead, so
+  unnamed tabs don't all share `zsh.md`. Prefer one file per tab that
   follows title changes? Set `file_name = "{title}_{id}"`.
 
   **Upgrading from 0.1**, whose default was one file per tab
@@ -47,7 +49,8 @@ terminal: shells, SSH sessions, REPLs, log tails.
   has no selection, term-notes reads the clipboard instead. It skips
   text it has already saved from that tab.
 - **Git context.** The repo and branch of the working directory are recorded
-  with each note.
+  with each note -- including on remote machines over SSH, with the shell
+  snippet (see [SSH sessions](#ssh-sessions)).
 - **Configurable.** Notes folder, file naming and shortcuts can all be
   changed.
 
@@ -108,6 +111,33 @@ Comments are entered with WezTerm's input prompt, and messages such as
 default viewer, and a clipboard tool (`pbpaste` on macOS; `wl-paste` or
 `xclip` on Linux). On Windows it logs an error and adds no shortcuts.
 
+## SSH sessions
+
+Over SSH, the terminal only knows your Mac's directory, so notes would say
+`~` with no repo. [`shell/term-notes.sh`](shell/term-notes.sh) fixes that:
+at every prompt it tells the terminal the host, directory, git repo and
+branch, and notes then record, for example:
+
+```markdown
+`pkbox:~/src/webapp` · `webapp` @ `fix/login`
+```
+
+Copy it to each machine you SSH into and source it from `~/.zshrc` or
+`~/.bashrc`:
+
+```sh
+scp shell/term-notes.sh pkbox:~/.term-notes.sh
+ssh pkbox 'echo "source ~/.term-notes.sh" >> ~/.zshrc'   # or ~/.bashrc
+```
+
+Source it on your Mac too: the values stay set after you log out of the
+remote host, and a local prompt replaces them. (term-notes ignores another
+host's values unless `ssh` or `mosh` is in the foreground, so notes stay
+right even without that.) It works in both iTerm2 and WezTerm; inside tmux,
+add `set -g allow-passthrough on` to `~/.tmux.conf`. Values are updated at
+each prompt, so inside a long-running program like Claude Code they
+describe where you started it.
+
 ## Configuration
 
 iTerm2 reads `~/.config/term-notes/config.toml`, or the path in
@@ -157,8 +187,8 @@ when you aren't saving, or copy them elsewhere first.
   selection.
 - If you press the shortcut without selecting anything in such an app,
   whatever you last copied is saved, once per pane. <kbd>⌃⌥Z</kbd> undoes it.
-- In SSH sessions, `{dir}` and git context describe your local machine, not
-  the remote one.
+- In SSH sessions without the [shell snippet](#ssh-sessions), `{dir}` and
+  git context describe your local machine, not the remote one.
 - Without `{id}`, tabs with generic titles (like `zsh`) share one file, and
   <kbd>⌃⌥Z</kbd> removes the file's last note even if another tab with the
   same title saved it.
@@ -172,6 +202,7 @@ when you aren't saving, or copy them elsewhere first.
 ```
 iterm/term_notes.py   iTerm2 script (symlinked into AutoLaunch by install.sh)
 plugin/init.lua       WezTerm plugin (WezTerm's plugin loader requires this path)
+shell/term-notes.sh   prompt hook for remote (and local) shells: host, dir, git
 config.example.toml   documented iTerm2 config
 tests/                tests for both implementations
 ```

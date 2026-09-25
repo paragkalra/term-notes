@@ -101,6 +101,48 @@ function M.slug(text)
   return s
 end
 
+-- Same as the iTerm2 script's file_title: a title that is just a shell or
+-- program name says nothing about the tab (every unnamed tab would share
+-- "zsh.md"), so file names use the working directory's name instead.
+local GENERIC_TITLES = {
+  zsh = true, bash = true, fish = true, sh = true, dash = true, ksh = true, tcsh = true,
+  csh = true, nu = true, pwsh = true, login = true, ssh = true, tab = true,
+}
+
+function M.file_title(title, cwd)
+  local name = M.slug(title)
+  if GENERIC_TITLES[name:lower()] and cwd and cwd ~= '' then
+    return M.slug(M.basename(cwd))
+  end
+  return name
+end
+
+-- Same as the iTerm2 script's remote_place: shell/term-notes.sh publishes
+-- the directory and git branch as user variables at each prompt, so notes
+-- from SSH sessions record where you were on the remote machine. Returns
+-- cwd, git (git may be nil) -- or nil to look locally. Values from another
+-- host are only trusted while an ssh-like program is in the foreground,
+-- since they outlive the SSH session that set them.
+local REMOTE_JOBS = {
+  ssh = true, mosh = true, ['mosh-client'] = true, et = true, autossh = true,
+  tsh = true, gcloud = true, aws = true,
+}
+
+function M.remote_place(user_vars, job, local_host)
+  local host = (user_vars.term_notes_host or ''):match('^%s*(.-)%s*$')
+  local dir = (user_vars.term_notes_dir or ''):match('^%s*(.-)%s*$')
+  if dir == '' then
+    return nil
+  end
+  local remote = host ~= '' and host:lower() ~= (local_host or ''):lower()
+  if remote and not REMOTE_JOBS[M.basename(job or '')] then
+    return nil
+  end
+  local repo, branch = user_vars.term_notes_repo or '', user_vars.term_notes_branch or ''
+  local git = repo ~= '' and { repo, branch ~= '' and branch or 'detached' } or nil
+  return remote and (host .. ':' .. dir) or dir, git
+end
+
 function M.basename(path)
   return (path or ''):gsub('/+$', ''):match('([^/]*)$') or ''
 end
@@ -330,6 +372,21 @@ local function tab_title(pane)
   return title
 end
 
+-- The pane's { title, cwd, git, look_locally }, read once per action so a
+-- note and its file name always agree.
+local function pane_context(pane)
+  local title = tab_title(pane)
+  local ok_vars, user_vars = pcall(function() return pane:get_user_vars() end)
+  local ok_job, job = pcall(function() return pane:get_foreground_process_name() end)
+  local ok_host, host = pcall(wezterm.hostname)
+  local cwd, git = M.remote_place(ok_vars and user_vars or {}, ok_job and job or nil,
+    ok_host and host and host:match('^[^.]+') or '')
+  if cwd then
+    return { title = title, cwd = cwd, git = git }
+  end
+  return { title = title, cwd = cwd_of(pane), look_locally = true }
+end
+
 local function file_exists(path)
   local f = io.open(path, 'r')
   if f then
@@ -495,13 +552,9 @@ end
 -- change while it runs git). Without it, they are read now.
 function M.notes_file(config, pane, context)
   local id = pane_key(pane)
-  local title, cwd
-  if context then
-    title, cwd = context.title, context.cwd
-  else
-    title, cwd = tab_title(pane), cwd_of(pane)
-  end
-  local fields = { title = M.slug(title), dir = M.slug(M.basename(cwd)), id = id }
+  context = context or pane_context(pane)
+  local title, cwd = context.title, context.cwd
+  local fields = { title = M.file_title(title, cwd), dir = M.slug(M.basename(cwd)), id = id }
   local wanted = config.notes_dir .. '/' .. M.render_name(config.file_name, fields) .. '.md'
   if not config.file_name:find('{id}', 1, true) then
     -- Shared by every pane with this title.
@@ -680,16 +733,22 @@ end
 local function write_note(config, window, pane, text, from_clipboard, comment)
   local lines = M.clean_lines(text)
   -- Read once, so the note and its file name always agree.
-  local title, cwd = tab_title(pane), cwd_of(pane)
+  local context = pane_context(pane)
+  local git = context.git
+  if not config.git_context then
+    git = nil
+  elseif context.look_locally then
+    git = git_context(context.cwd)
+  end
   return exclusive(window, function()
     run { 'mkdir', '-p', config.notes_dir }
-    local notes_file = M.notes_file(config, pane, { title = title, cwd = cwd })
+    local notes_file = M.notes_file(config, pane, context)
     local ok = append(notes_file, M.format_note(lines, {
       when = os.date('%Y-%m-%d %H:%M'),
-      title = title,
-      cwd = cwd,
+      title = context.title,
+      cwd = context.cwd,
       home = wezterm.home_dir,
-      git = config.git_context and git_context(cwd) or nil,
+      git = git,
       comment = comment,
     }))
     if not ok then

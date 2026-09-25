@@ -22,6 +22,7 @@ import hashlib
 import logging
 import os
 import re
+import socket
 import stat
 import tempfile
 import tomllib
@@ -117,6 +118,22 @@ def slug(text):
     return re.sub(r"[^\w.]+", "-", text or "").strip("-.")[:80] or "tab"
 
 
+# Titles that are just a shell or program name say nothing about the tab
+# (every unnamed tab would share "zsh.md"), so file names use the working
+# directory's name instead.
+GENERIC_TITLES = {"zsh", "bash", "fish", "sh", "dash", "ksh", "tcsh", "csh", "nu",
+                  "pwsh", "login", "ssh", "tab"}
+
+
+def file_title(title, cwd):
+    """The title used in file names: the tab title, or the directory's name
+    if the title is just a shell name."""
+    name = slug(title)
+    if name.lower() in GENERIC_TITLES and cwd:
+        return slug(os.path.basename(cwd.rstrip("/")))
+    return name
+
+
 def short_id(session_id):
     # 64 bits of the session UUID: collisions stay negligible even across
     # years of accumulated notes files (32 bits would not).
@@ -132,7 +149,7 @@ def notes_file_for(notes_dir, template, session_id, title, cwd):
     title changes. (Split panes are separate sessions, so each pane gets its
     own id.)
     """
-    fields = {"title": slug(title), "dir": slug(os.path.basename(cwd or "")),
+    fields = {"title": file_title(title, cwd), "dir": slug(os.path.basename(cwd or "")),
               "id": short_id(session_id)}
     wanted = os.path.join(notes_dir, render_name(template, fields) + ".md")
     if "{id}" not in template:
@@ -473,6 +490,36 @@ async def run(*args, timeout=2):
     return out.decode("utf-8", errors="replace") if proc.returncode == 0 else None
 
 
+# Published at each prompt by shell/term-notes.sh (OSC 1337 SetUserVar), so
+# notes from SSH sessions can record the remote directory and git branch.
+REMOTE_VARS = ("host", "dir", "repo", "branch")
+# Foreground programs that mean "this tab is on another machine".
+REMOTE_JOBS = {"ssh", "mosh", "mosh-client", "et", "autossh", "tsh", "gcloud", "aws"}
+
+
+def local_hostname():
+    return socket.gethostname().split(".")[0]
+
+
+def remote_place(user_vars, job, local_host):
+    """(cwd, git) from the snippet's user variables, or None to look locally.
+
+    The variables outlive the SSH session that set them, so values from
+    another host are only trusted while an ssh-like program is in the
+    foreground (sourcing the snippet locally too keeps them current).
+    """
+    host = (user_vars.get("host") or "").strip()
+    directory = (user_vars.get("dir") or "").strip()
+    if not directory:
+        return None
+    remote = bool(host) and host.lower() != local_host.lower()
+    if remote and os.path.basename(job or "") not in REMOTE_JOBS:
+        return None
+    repo, branch = user_vars.get("repo") or "", user_vars.get("branch") or ""
+    return (f"{host}:{directory}" if remote else directory,
+            (repo, branch or "detached") if repo else None)
+
+
 async def git_context(cwd):
     if not cwd:
         return None
@@ -520,6 +567,9 @@ def load_bindings(load=None):
         else:
             bindings[key] = uses[0]
     return bindings, errors
+
+
+LOOK_LOCALLY = object()  # git context isn't known yet: run git on this Mac
 
 
 class NoteTaker:
@@ -610,14 +660,22 @@ class NoteTaker:
         return title or await session.async_get_variable("name")
 
     async def context(self, session):
-        """The tab's (title, cwd), read once per action so the note and its
-        file name always agree."""
-        return await self.tab_title(session), await session.async_get_variable("path")
+        """The tab's (title, cwd, git), read once per action so the note and
+        its file name always agree. git is (repo, branch) or None when the
+        snippet's user variables say where the tab is, else LOOK_LOCALLY."""
+        title = await self.tab_title(session)
+        user_vars = {name: await session.async_get_variable(f"user.term_notes_{name}")
+                     for name in REMOTE_VARS}
+        place = remote_place(user_vars, await session.async_get_variable("jobName"),
+                             local_hostname())
+        if place:
+            return (title, *place)
+        return title, await session.async_get_variable("path"), LOOK_LOCALLY
 
     async def locked(self, fn, session, config, context, *args):
         """Run fn(notes_dir, template, session_id, title, cwd, *args) in a
         worker thread, since it waits for the notes lock."""
-        title, cwd = context
+        title, cwd, _ = context
         return await asyncio.to_thread(fn, config["notes_dir"], config["file_name"],
                                        session.session_id, title, cwd, *args)
 
@@ -641,8 +699,11 @@ class NoteTaker:
             if comment is None:  # cancelled
                 return
 
-        title, cwd = context = await self.context(session)
-        git = await git_context(cwd) if config["git_context"] else None
+        title, cwd, git = context = await self.context(session)
+        if not config["git_context"]:
+            git = None
+        elif git is LOOK_LOCALLY:
+            git = await git_context(cwd)
         note = format_note(lines, when=datetime.datetime.now(), title=title, cwd=cwd,
                            git=git, comment=comment)
         notes_file = await self.locked(save_note, session, config, context, note)
