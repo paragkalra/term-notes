@@ -65,6 +65,7 @@ def test_slug_matches_python_for_ascii_titles(wez, title):
     {"cwd": "/opt/x", "comment": "  why this matters  "},
     {"title": "T", "cwd": HOME, "git": ("r", "feat/x"), "comment": "c"},
     {"title": "task\n## subtitle", "cwd": "/a\r\n/b", "comment": " line one\n  line two "},
+    {"git": ("my\n## repo", "feat\n## x")},
 ])
 def test_note_format_matches_python(wez, monkeypatch, kwargs):
     lua, plugin, _, _ = wez
@@ -330,3 +331,71 @@ def test_clipboard_can_be_retried_after_failed_save(wez, tmp_path):
     call(working.save, window, pane)  # same clipboard again: skipped
     [name] = os.listdir(notes)
     assert (notes / name).read_text().count("> copied by the app") == 1
+
+
+def test_concurrent_save_cannot_duplicate_clipboard(wez, tmp_path):
+    # run_child_process yields in real WezTerm, so another save can run in the
+    # middle of one. Simulate that by saving again from inside the first save.
+    lua, plugin, _, fake = wez
+    actions = plugin.actions(settings_for(lua, plugin, tmp_path))
+    window, pane, state = make_pane(lua, selection="", cwd=str(tmp_path))
+    fake["clipboard"] = "copied by the app"
+    nested = {"done": False}
+    real_cwd = pane.get_current_working_dir
+
+    def cwd_with_nested_save(p):
+        if not nested["done"]:
+            nested["done"] = True
+            call(actions.save, window, pane)
+        return real_cwd(p)
+
+    pane.get_current_working_dir = cwd_with_nested_save
+    call(actions.save, window, pane)
+    [name] = os.listdir(tmp_path)
+    assert (tmp_path / name).read_text().count("> copied by the app") == 1
+    assert "Nothing selected" in list(state.toasts.values())
+
+    # The claim is released afterwards: a new clipboard value saves normally.
+    fake["clipboard"] = "something else"
+    call(actions.save, window, pane)
+    assert (tmp_path / name).read_text().count("> something else") == 1
+
+
+def test_cancelled_comment_releases_clipboard(wez, tmp_path):
+    lua, plugin, _, fake = wez
+    actions = plugin.actions(settings_for(lua, plugin, tmp_path))
+    window, pane, state = make_pane(lua, selection="")
+    fake["clipboard"] = "copied by the app"
+    call(actions.save_with_comment, window, pane)
+    state.prompt.args.action.callback(window, pane, None)  # Esc
+    call(actions.save, window, pane)
+    [name] = os.listdir(tmp_path)
+    assert "> copied by the app" in (tmp_path / name).read_text()
+
+
+def test_undo_preserves_permissions_and_existing_tmp(wez, tmp_path):
+    lua, plugin, _, _ = wez
+    actions = plugin.actions(settings_for(lua, plugin, tmp_path))
+    window, pane, state = make_pane(lua, selection="one")
+    call(actions.save, window, pane)
+    state.selection = "two"
+    call(actions.save, window, pane)
+    [name] = os.listdir(tmp_path)
+    notes = tmp_path / name
+    notes.chmod(0o600)
+    stray = tmp_path / (name + ".tmp")
+    stray.write_text("someone else's file")
+    call(actions.undo, window, pane)
+    assert "> two" not in notes.read_text()
+    assert notes.stat().st_mode & 0o777 == 0o600
+    assert stray.read_text() == "someone else's file"
+    assert sorted(os.listdir(tmp_path)) == sorted([name, stray.name])
+
+
+def test_windows_adds_no_shortcuts(wez):
+    lua, plugin, stub, _ = wez
+    stub.target_triple = "x86_64-pc-windows-msvc"
+    config = lua.eval("{}")
+    plugin.apply_to_config(config, None)
+    assert len(config["keys"]) == 0
+    assert "Windows is not supported" in stub.errors[1]

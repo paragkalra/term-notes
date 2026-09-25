@@ -13,12 +13,15 @@ Settings > General > Magic > Enable Python API. Configuration lives in
 https://github.com/paragkalra/term-notes
 """
 import asyncio
+import collections
 import contextlib
 import datetime
 import glob
 import logging
 import os
 import re
+import stat
+import tempfile
 import tomllib
 
 import iterm2
@@ -137,7 +140,7 @@ def format_note(lines, *, when, title=None, cwd=None, git=None, comment=None):
     if cwd:
         context.append(f"`{abbreviate_home(cwd)}`")
     if git:
-        repo, branch = git
+        repo, branch = map(one_line, git)
         context.append(f"`{repo}` @ `{branch}`")
     parts = [header]
     if context:
@@ -169,11 +172,15 @@ def remove_last_note(notes_file):
         return False
     remaining = content[:starts[-1]]
     if remaining.strip():
-        # Write a temp file and rename it over the original, so a failed
-        # write can't truncate the notes that are being kept.
-        tmp = notes_file + ".tmp"
+        # Write a uniquely named temp file with the original's permissions and
+        # rename it over the original, so a failed write can't truncate the
+        # notes that are being kept.
+        fd, tmp = tempfile.mkstemp(
+            dir=os.path.dirname(notes_file) or ".",
+            prefix="." + os.path.basename(notes_file) + ".", suffix=".tmp")
         try:
-            with open(tmp, "w", encoding="utf-8") as f:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                os.fchmod(f.fileno(), stat.S_IMODE(os.stat(notes_file).st_mode))
                 f.write(remaining)
                 f.flush()
                 os.fsync(f.fileno())
@@ -250,6 +257,10 @@ class NoteTaker:
         # session id -> last clipboard text saved, so a stale clipboard
         # isn't saved twice.
         self.last_clipboard = {}
+        # Shortcuts run as independent tasks. One lock per session makes saves
+        # and undos in a tab run one at a time, so two quick presses can't
+        # both pass the clipboard check before either has saved.
+        self.locks = collections.defaultdict(asyncio.Lock)
 
     async def selected_text(self, session):
         """Return (text, from_clipboard)."""
@@ -275,6 +286,10 @@ class NoteTaker:
                               session.session_id, title, cwd)
 
     async def save(self, session, ask_comment=False):
+        async with self.locks[session.session_id]:
+            await self._save(session, ask_comment)
+
+    async def _save(self, session, ask_comment):
         config = load_config()
         text, from_clipboard = await self.selected_text(session)
         lines = clean_lines(text)
@@ -305,6 +320,10 @@ class NoteTaker:
         log.info("saved %d line(s) to %s", len(lines), notes_file)
 
     async def undo(self, session):
+        async with self.locks[session.session_id]:
+            await self._undo(session)
+
+    async def _undo(self, session):
         config = load_config()
         if not remove_last_note(await self.notes_file(session, config)):
             log.info("no notes to undo")

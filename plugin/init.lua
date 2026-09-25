@@ -134,7 +134,7 @@ function M.format_note(lines, opts)
     context[#context + 1] = '`' .. M.abbreviate_home(cwd, opts.home) .. '`'
   end
   if opts.git then
-    context[#context + 1] = '`' .. opts.git[1] .. '` @ `' .. opts.git[2] .. '`'
+    context[#context + 1] = '`' .. M.one_line(opts.git[1]) .. '` @ `' .. M.one_line(opts.git[2]) .. '`'
   end
   if #context > 0 then
     parts[#parts + 1] = table.concat(context, ' · ')
@@ -292,6 +292,10 @@ function M.notes_file(config, pane)
 end
 
 local last_clipboard = {}
+-- Clipboard text being saved right now (possibly waiting on the comment
+-- prompt). run_child_process yields, so a second key press can run while a
+-- save is in progress; this stops it from saving the same text again.
+local pending_clipboard = {}
 
 -- Returns text, from_clipboard.
 local function selected_text(window, pane)
@@ -302,10 +306,18 @@ local function selected_text(window, pane)
   -- Apps with their own mouse handling (Claude Code, Codex, ...) copy their
   -- selection to the clipboard instead of making a terminal selection.
   text = read_clipboard()
-  if not text or text == last_clipboard[pane_key(pane)] then
+  local key = pane_key(pane)
+  if not text or text == last_clipboard[key] or text == pending_clipboard[key] then
     return nil, false
   end
+  pending_clipboard[key] = text
   return text, true
+end
+
+local function release(pane, from_clipboard)
+  if from_clipboard then
+    pending_clipboard[pane_key(pane)] = nil
+  end
 end
 
 local function toast(window, message)
@@ -313,7 +325,7 @@ local function toast(window, message)
 end
 
 -- Appends the note; returns true on success.
-local function save(config, window, pane, text, from_clipboard, comment)
+local function write_note(config, window, pane, text, from_clipboard, comment)
   local lines = M.clean_lines(text)
   local cwd = cwd_of(pane)
   local notes_file = M.notes_file(config, pane)
@@ -340,12 +352,23 @@ local function save(config, window, pane, text, from_clipboard, comment)
   return true
 end
 
+-- write_note, always releasing the pending clipboard claim, even on error.
+local function save(config, window, pane, text, from_clipboard, comment)
+  local ok, result = pcall(write_note, config, window, pane, text, from_clipboard, comment)
+  release(pane, from_clipboard)
+  if not ok then
+    error(result)
+  end
+  return result
+end
+
 function M.actions(config)
   local actions = {}
 
   actions.save = wezterm.action_callback(function(window, pane)
     local text, from_clipboard = selected_text(window, pane)
     if #M.clean_lines(text) == 0 then
+      release(pane, from_clipboard)
       toast(window, 'Nothing selected')
       return
     end
@@ -355,6 +378,7 @@ function M.actions(config)
   actions.save_with_comment = wezterm.action_callback(function(window, pane)
     local text, from_clipboard = selected_text(window, pane)
     if #M.clean_lines(text) == 0 then
+      release(pane, from_clipboard)
       toast(window, 'Nothing selected')
       return
     end
@@ -363,6 +387,8 @@ function M.actions(config)
       action = wezterm.action_callback(function(w, p, comment)
         if comment ~= nil then
           save(config, w, p, text, from_clipboard, comment)
+        else
+          release(p, from_clipboard)
         end
       end),
     }, pane)
@@ -398,10 +424,12 @@ function M.actions(config)
       return
     end
     if remaining:find('%S') then
-      -- Write a temp file and rename it over the original, so a failed
-      -- write can't truncate the notes that are being kept.
-      local tmp = notes_file .. '.tmp'
-      local out = io.open(tmp, 'w')
+      -- Write a uniquely named temp file and rename it over the original, so
+      -- a failed write can't truncate the notes that are being kept. The temp
+      -- file starts as a `cp -p` copy so it keeps the original's permissions
+      -- (plain Lua can't set them); opening it for writing truncates it.
+      local tmp = string.format('%s.%08x.tmp', notes_file, math.random(0, 0x7fffffff))
+      local out = run { 'cp', '-p', notes_file, tmp } and io.open(tmp, 'w')
       local ok = out and out:write(remaining)
       ok = out and out:close() and ok
       if not ok or not os.rename(tmp, notes_file) then
@@ -420,9 +448,15 @@ function M.actions(config)
 end
 
 function M.apply_to_config(config, opts)
+  config.keys = config.keys or {}
+  -- Saving, the clipboard fallback and the default viewer rely on POSIX
+  -- tools (mkdir, cp, pbpaste/wl-paste/xclip, less).
+  if (wezterm.target_triple or ''):find('windows') then
+    wezterm.log_error('term-notes: Windows is not supported yet; no shortcuts were added')
+    return config
+  end
   local settings = M.settings(opts)
   local actions = M.actions(settings)
-  config.keys = config.keys or {}
   for name, spec in pairs(settings.keys) do
     if spec and actions[name] then
       local binding = M.parse_key(spec)

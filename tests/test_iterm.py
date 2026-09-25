@@ -304,3 +304,51 @@ def test_clipboard_can_be_retried_after_failed_save(tmp_path, monkeypatch):
     [name] = os.listdir(tmp_path / "notes")
     assert name == "My-tab_934051cd.md"
     assert (tmp_path / "notes" / name).read_text().count("> copied by the app") == 1
+
+
+def test_git_metadata_cannot_fake_a_note_boundary(tmp_path):
+    path = str(tmp_path / "n.md")
+    first = th.format_note(["one"], when=WHEN)
+    second = th.format_note(["two"], when=WHEN, git=("my\n## repo", "feat\n## x"))
+    assert "`my ## repo` @ `feat ## x`" in second
+    th.append_note(path, first)
+    th.append_note(path, second)
+    assert th.remove_last_note(path)
+    with open(path) as f:
+        assert f.read() == first
+
+
+def test_undo_preserves_permissions_and_existing_tmp(tmp_path):
+    path = tmp_path / "n.md"
+    th.append_note(str(path), th.format_note(["one"], when=WHEN))
+    th.append_note(str(path), th.format_note(["two"], when=WHEN))
+    path.chmod(0o600)
+    stray = tmp_path / "n.md.tmp"
+    stray.write_text("someone else's file")
+    assert th.remove_last_note(str(path))
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert stray.read_text() == "someone else's file"
+    assert sorted(os.listdir(tmp_path)) == ["n.md", "n.md.tmp"]
+
+
+def test_concurrent_saves_cannot_duplicate_clipboard(tmp_path, monkeypatch):
+    async def fake_run(*args, timeout=2):
+        if args[0] == "/usr/bin/pbpaste":
+            return "copied by the app\n"
+        await asyncio.sleep(0.01)  # the git lookup yields, as it does for real
+        return None
+
+    config = th.load_config(str(tmp_path / "missing.toml"))
+    config["notes_dir"] = str(tmp_path / "notes")
+    monkeypatch.setattr(th, "run", fake_run)
+    monkeypatch.setattr(th, "load_config", lambda: config)
+
+    notes = th.NoteTaker(connection=None)
+    session = FakeSession(str(tmp_path))
+
+    async def two_quick_presses():
+        await asyncio.gather(notes.save(session), notes.save(session))
+
+    asyncio.run(two_quick_presses())
+    [name] = os.listdir(tmp_path / "notes")
+    assert (tmp_path / "notes" / name).read_text().count("> copied by the app") == 1
