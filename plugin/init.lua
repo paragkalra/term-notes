@@ -50,8 +50,9 @@ end
 
 local PLACEHOLDERS = { title = true, dir = true, id = true }
 
--- Same rules as the iTerm2 script's check_file_name: only {title}, {dir} and
--- {id}, with {id} appended if missing.
+-- Same rules as the iTerm2 script's check_file_name: only plain {title},
+-- {dir} and {id} (no format specs or escapes), no glob characters, and {id}
+-- appended if missing.
 function M.check_file_name(template)
   local unknown = {}
   for name in template:gmatch('{([^{}]*)}') do
@@ -64,8 +65,13 @@ function M.check_file_name(template)
     error('term-notes: file_name ' .. template .. ' has unknown placeholder '
       .. table.concat(unknown, ', ') .. '; use {title}, {dir} and {id}', 0)
   end
-  if template:gsub('{[^{}]*}', ''):find('[{}]') then
+  local literal = template:gsub('{[^{}]*}', '')
+  if literal:find('[{}]') then
     error('term-notes: file_name ' .. template .. ' has an unmatched { or }', 0)
+  end
+  -- The template is also used as a glob pattern to find the pane's file.
+  if literal:find('[%*%?%[%]]') then
+    error("term-notes: file_name " .. template .. " can't contain * ? [ or ]", 0)
   end
   if not template:find('{id}', 1, true) then
     template = template .. '_{id}'
@@ -94,6 +100,12 @@ end
 
 function M.basename(path)
   return (path or ''):gsub('/+$', ''):match('([^/]*)$') or ''
+end
+
+-- Make glob metacharacters in a path match literally, like Python's
+-- glob.escape: "notes [work]" -> "notes [[]work[]]".
+function M.glob_escape(path)
+  return (path:gsub('[%*%?%[%]]', '[%0]'))
 end
 
 function M.render_name(template, fields)
@@ -317,7 +329,7 @@ function M.notes_file(config, pane)
   local fields = { title = M.slug(tab_title(pane)), dir = M.slug(M.basename(cwd)), id = id }
   local wanted = config.notes_dir .. '/' .. M.render_name(config.file_name, fields) .. '.md'
   local wildcard = M.render_name(config.file_name, { title = '*', dir = '*', id = id })
-  local ok, existing = pcall(wezterm.glob, config.notes_dir .. '/' .. wildcard .. '.md')
+  local ok, existing = pcall(wezterm.glob, M.glob_escape(config.notes_dir) .. '/' .. wildcard .. '.md')
   if not ok or #existing == 0 then
     return wanted
   end

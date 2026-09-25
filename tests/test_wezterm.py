@@ -433,3 +433,43 @@ def test_ambiguous_matches_are_not_renamed(wez, tmp_path):
     assert sorted(os.listdir(tmp_path)) == sorted([first, older.name])  # nothing renamed or lost
     assert "> b" in (tmp_path / first).read_text()  # written to the newest match
     assert older.read_text() == "stray"
+
+
+
+BAD_TEMPLATES = [
+    "{titel}_{id}", "{title}_{0}", "{title", "title}", "{title:>10}_{id}",
+    "{title!r}_{id}", "{{title}}_{id}", "[term]-{title}_{id}", "a*{title}_{id}",
+    "{title}?_{id}",
+]
+GOOD_TEMPLATES = ["{title}", "{dir}-{title}-{id}", "notes.{id}", "{id}"]
+
+
+@pytest.mark.parametrize("template", BAD_TEMPLATES)
+def test_bad_templates_rejected_by_both(wez, template):
+    _, plugin, _, _ = wez
+    with pytest.raises(ValueError):
+        th.check_file_name(template)
+    with pytest.raises(Exception, match="term-notes: file_name"):
+        plugin.check_file_name(template)
+
+
+@pytest.mark.parametrize("template", GOOD_TEMPLATES)
+def test_good_templates_render_the_same_in_both(wez, template):
+    lua, plugin, _, _ = wez
+    checked = th.check_file_name(template)
+    assert plugin.check_file_name(template) == checked
+    fields = {"title": "T", "dir": "D", "id": "abc12345"}
+    assert plugin.render_name(checked, lua.table_from(fields)) == th.render_name(checked, fields)
+
+
+def test_notes_dir_with_glob_characters(wez, tmp_path):
+    lua, plugin, _, _ = wez
+    notes = tmp_path / "notes [work] *?"
+    actions = plugin.actions(settings_for(lua, plugin, notes))
+    window, pane, state = make_pane(lua, title="First", selection="a")
+    call(actions.save, window, pane)
+    state.title, state.selection = "Second", "b"
+    call(actions.save, window, pane)
+    [name] = os.listdir(notes)  # renamed, not a second file
+    assert name.startswith("Second_")
+    assert (notes / name).read_text().count("## ") == 2

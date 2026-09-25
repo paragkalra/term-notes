@@ -368,8 +368,12 @@ def test_clean_lines_mixed_indentation(text, expected):
 @pytest.mark.parametrize("template, message", [
     ("{titel}_{id}", "{titel}"),
     ("{title}_{0}", "{0}"),
-    ("{title", "invalid"),
-    ("title}", "invalid"),
+    ("{title", "unmatched"),
+    ("title}", "unmatched"),
+    ("{title:>10}_{id}", "{title:>10}"),
+    ("{title!r}_{id}", "{title!r}"),
+    ("{{title}}_{id}", "unmatched"),
+    ("[term]-{title}_{id}", "* ? [ or ]"),
 ])
 def test_bad_file_name_template_is_rejected(tmp_path, template, message):
     with pytest.raises(ValueError, match=re.escape(message)):
@@ -422,3 +426,47 @@ def test_failed_action_shows_an_alert(tmp_path, monkeypatch):
     [(title, message)] = alerts
     assert title == "term-notes: save failed"
     assert "{titel}" in message
+
+
+
+def test_load_bindings_reports_problems_and_falls_back(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('file_name = "{titel}"\n')
+    bindings, errors = th.load_bindings(lambda: th.load_config(str(path)))
+    assert len(errors) == 1 and "{titel}" in errors[0]
+    assert sorted(name for name, _ in bindings.values()) == sorted(th.DEFAULTS["keys"])
+
+    path.write_text('[keys]\nsave = "ctrl+alt+f5"\nbogus = "ctrl+alt+b"\n')
+    bindings, errors = th.load_bindings(lambda: th.load_config(str(path)))
+    assert any("f5" in e for e in errors) and any("bogus" in e for e in errors)
+    names = {name for name, _ in bindings.values()}
+    assert "save" not in names and "undo" in names  # the rest still work
+
+
+def test_clipboard_state_is_a_digest_and_forgotten(tmp_path, monkeypatch):
+    async def fake_run(*args, timeout=2):
+        return "a large selection\n" if args[0] == "/usr/bin/pbpaste" else None
+
+    config = th.load_config(str(tmp_path / "missing.toml"))
+    config["notes_dir"] = str(tmp_path / "notes")
+    monkeypatch.setattr(th, "run", fake_run)
+    monkeypatch.setattr(th, "load_config", lambda: config)
+    notes = th.NoteTaker(connection=None)
+    asyncio.run(notes.save(FakeSession(str(tmp_path))))
+    stored = notes.last_clipboard[SESSION]
+    assert stored == th.digest("a large selection\n") and "selection" not in stored
+    assert SESSION in notes.locks
+
+    notes.forget(SESSION)
+    assert SESSION not in notes.last_clipboard and SESSION not in notes.locks
+
+
+def test_forget_keeps_a_lock_that_is_in_use():
+    notes = th.NoteTaker(connection=None)
+
+    async def scenario():
+        async with notes.locks[SESSION]:
+            notes.forget(SESSION)
+            assert SESSION in notes.locks
+
+    asyncio.run(scenario())

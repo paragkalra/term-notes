@@ -17,11 +17,11 @@ import collections
 import contextlib
 import datetime
 import glob
+import hashlib
 import logging
 import os
 import re
 import stat
-import string
 import tempfile
 import tomllib
 
@@ -77,21 +77,35 @@ def load_config(path=CONFIG_PATH):
 PLACEHOLDERS = ("title", "dir", "id")
 
 
+PLACEHOLDER = re.compile(r"\{([^{}]*)\}")
+
+
 def check_file_name(template):
-    """Validate a file_name template; appends {id} if it is missing."""
-    try:
-        names = {name for _, name, _, _ in string.Formatter().parse(template) if name is not None}
-    except ValueError as e:  # unbalanced braces
-        raise ValueError(f"config: file_name {template!r} is invalid: {e}") from None
-    unknown = sorted(names - set(PLACEHOLDERS))
+    """Validate a file_name template; appends {id} if it is missing.
+
+    Only plain {title}, {dir} and {id} are allowed -- no format specs,
+    conversions or {{escapes}} -- so the WezTerm plugin can apply exactly the
+    same rules. Glob characters are rejected because the template is also
+    used as a glob pattern to find the tab's file after a title change.
+    """
+    unknown = sorted({"{" + name + "}" for name in PLACEHOLDER.findall(template)
+                      if name not in PLACEHOLDERS})
     if unknown:
         raise ValueError(
-            f"config: file_name {template!r} has unknown placeholder "
-            + ", ".join("{" + name + "}" for name in unknown)
-            + "; use {title}, {dir} and {id}")
+            f"config: file_name {template!r} has unknown placeholder {', '.join(unknown)}; "
+            "use {title}, {dir} and {id}")
+    literal = PLACEHOLDER.sub("", template)
+    if re.search(r"[{}]", literal):
+        raise ValueError(f"config: file_name {template!r} has an unmatched {{ or }}")
+    if re.search(r"[*?\[\]]", literal):
+        raise ValueError(f"config: file_name {template!r} can't contain * ? [ or ]")
     if "{id}" not in template:
         template += "_{id}"
     return template
+
+
+def render_name(template, fields):
+    return PLACEHOLDER.sub(lambda m: fields[m.group(1)], template)
 
 
 def slug(text):
@@ -113,8 +127,8 @@ def notes_file_for(notes_dir, template, session_id, title, cwd):
     """
     fields = {"title": slug(title), "dir": slug(os.path.basename(cwd or "")),
               "id": short_id(session_id)}
-    wanted = os.path.join(notes_dir, template.format(**fields) + ".md")
-    wildcard = template.format(title="*", dir="*", id=fields["id"]) + ".md"
+    wanted = os.path.join(notes_dir, render_name(template, fields) + ".md")
+    wildcard = render_name(template, {"title": "*", "dir": "*", "id": fields["id"]}) + ".md"
     existing = glob.glob(os.path.join(glob.escape(notes_dir), wildcard))
     if not existing or wanted in existing:
         return wanted
@@ -296,18 +310,55 @@ async def git_context(cwd):
     return os.path.basename(toplevel.strip()), branch or "detached"
 
 
+def digest(text):
+    return hashlib.sha256(text.encode("utf-8", errors="surrogatepass")).hexdigest()
+
+
+def load_bindings(load=None):
+    """Read the shortcut bindings, collecting config problems instead of raising.
+
+    Returns (bindings, errors). If the config can't be loaded at all, the
+    default shortcuts are used so the tool keeps working; saves will then
+    show the config error in an alert.
+    """
+    errors = []
+    try:
+        keys = (load or load_config)()["keys"]
+    except Exception as e:
+        errors.append(str(e) or repr(e))
+        keys = DEFAULTS["keys"]
+    bindings = {}
+    for name, spec in keys.items():
+        if name not in NoteTaker.ACTIONS:
+            errors.append(f"config: unknown key binding {name!r}")
+        elif spec:
+            try:
+                bindings[parse_key(spec)] = (name, spec)
+            except ValueError as e:
+                errors.append(f"config: {e}")
+    return bindings, errors
+
+
 class NoteTaker:
     ACTIONS = ("save", "save_with_comment", "open_notes", "undo")
 
     def __init__(self, connection):
         self.connection = connection
-        # session id -> last clipboard text saved, so a stale clipboard
-        # isn't saved twice.
+        # session id -> digest of the last clipboard text saved, so a stale
+        # clipboard isn't saved twice. (A digest, so closed sessions don't
+        # keep whole selections in memory; see forget().)
         self.last_clipboard = {}
         # Shortcuts run as independent tasks. One lock per session makes saves
         # and undos in a tab run one at a time, so two quick presses can't
         # both pass the clipboard check before either has saved.
         self.locks = collections.defaultdict(asyncio.Lock)
+
+    def forget(self, session_id):
+        """Drop per-session state once the session has closed."""
+        self.last_clipboard.pop(session_id, None)
+        lock = self.locks.get(session_id)
+        if lock is not None and not lock.locked():
+            del self.locks[session_id]
 
     async def perform(self, name, session):
         """Run an action, showing an alert if it fails.
@@ -341,7 +392,7 @@ class NoteTaker:
         # the selection themselves and copy it to the clipboard, so iTerm2
         # never sees it. Fall back to the clipboard.
         text = await run("/usr/bin/pbpaste")
-        if not text or text == self.last_clipboard.get(session.session_id):
+        if not text or digest(text) == self.last_clipboard.get(session.session_id):
             return None, False
         return text, True
 
@@ -386,7 +437,7 @@ class NoteTaker:
             comment=comment))
         # Only now that the note is on disk, so a failed save can be retried.
         if from_clipboard:
-            self.last_clipboard[session.session_id] = text
+            self.last_clipboard[session.session_id] = digest(text)
         log.info("saved %d line(s) to %s", len(lines), notes_file)
 
     async def undo(self, session):
@@ -431,6 +482,7 @@ async def main(connection):
     app = await iterm2.async_get_app(connection)
     notes = NoteTaker(connection)
     actions = NoteTaker.ACTIONS
+    running = set()  # background tasks; asyncio only keeps weak references
 
     async def dispatch(name, session_id):
         session = app.get_session_by_id(session_id)
@@ -449,21 +501,25 @@ async def main(connection):
     for name in actions:
         await make_rpc(name).async_register(connection)
 
-    bindings = {}
-    for name, spec in load_config()["keys"].items():
-        if name not in actions:
-            log.warning("config: ignoring unknown key binding %r", name)
-        elif spec:
-            try:
-                bindings[parse_key(spec)] = name
-            except ValueError as e:
-                log.error("config: %s", e)
+    bindings, errors = load_bindings()
+    if errors:
+        for error in errors:
+            log.error("%s", error)
+        # Not awaited: the alert waits for a click, and shortcuts should work
+        # meanwhile.
+        alert = iterm2.Alert("term-notes: problem with your config", "\n".join(errors))
+        running.add(asyncio.create_task(alert.async_run(connection)))
 
-    running = set()
+    async def forget_closed_sessions():
+        async with iterm2.SessionTerminationMonitor(connection) as monitor:
+            while True:
+                notes.forget(await monitor.async_get())
+
+    running.add(asyncio.create_task(forget_closed_sessions()))
 
     async def on_keystroke(_connection, notification):
         modifiers = frozenset(map(iterm2.Modifier, notification.modifiers)) & SIGNIFICANT_MODIFIERS
-        name = bindings.get((modifiers, notification.keyCode))
+        name, _ = bindings.get((modifiers, notification.keyCode), (None, None))
         if name:
             # Run in a task so a comment prompt doesn't block other keys.
             # asyncio only keeps weak references to tasks, so hold on to it.
@@ -476,7 +532,7 @@ async def main(connection):
         await iterm2.notifications.async_subscribe_to_keystroke_notification(
             connection, on_keystroke)
         log.info("term-notes %s ready: %s", __version__,
-                 ", ".join(f"{name}={load_config()['keys'][name]}" for name in bindings.values()))
+                 ", ".join(f"{name}={spec}" for name, spec in bindings.values()))
         await asyncio.Future()  # run until iTerm2 stops the script
 
 
