@@ -45,6 +45,7 @@ def make_pane(lua, *, pane_id=1, tab_title="", title="zsh", cwd="/tmp", selectio
           local window = {
             get_selection_text_for_pane = function() return state.selection end,
             toast_notification = function(_, _, msg) table.insert(state.toasts, msg) end,
+            set_right_status = function(_, text) state.status = text end,
             perform_action = function(self, action, p) state.prompt = action end,
           }
           return window, pane, state
@@ -942,3 +943,20 @@ def test_unreadable_legacy_file_is_kept(wez, tmp_path):
     kept = tmp_path / ".Shared_aaaaaaaaaaaaaaaa.md.merging"
     assert kept.read_text() == "## precious\n\n"
     assert any("its notes are in" in msg for msg in stub.errors.values())
+
+
+
+def test_messages_show_in_the_tab_bar(wez, tmp_path):
+    lua, plugin, stub, fake = wez
+    actions = plugin.actions(settings_for(lua, plugin, tmp_path))
+    window, pane, state = make_pane(lua, selection="")
+    fake["clipboard"] = None
+    call(actions.save, window, pane)
+    assert state.status == " term-notes: Nothing selected "
+    call(actions.undo, window, pane)  # a second message before the first clears
+    assert state.status == " term-notes: No notes to undo "
+    first, second = stub.timers[1], stub.timers[2]
+    first()  # the first message's timer must not clear the newer one
+    assert state.status == " term-notes: No notes to undo "
+    second()
+    assert state.status == ""

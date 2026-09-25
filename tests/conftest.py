@@ -65,6 +65,13 @@ def load_wezterm_plugin(home="/Users/me"):
             end }),
           }
           function stub.action_callback(fn) return { callback = fn } end
+          stub.timers = {}
+          stub.time = { call_after = function(_, fn) table.insert(stub.timers, fn) end }
+          function stub.format(items)
+            local out = {}
+            for _, item in ipairs(items) do out[#out + 1] = item.Text or '' end
+            return table.concat(out)
+          end
           function stub.log_info(msg) table.insert(stub.logs, msg) end
           function stub.log_error(msg) table.insert(stub.errors, msg) end
           function stub.log_warn(msg) table.insert(stub.logs, msg) end

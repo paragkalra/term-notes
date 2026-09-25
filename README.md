@@ -100,7 +100,8 @@ return config
 ```
 
 The WezTerm plugin has the same shortcuts and writes the same notes format.
-Comments are entered with WezTerm's input prompt.
+Comments are entered with WezTerm's input prompt, and messages such as
+"Nothing selected" appear on the right of the tab bar for a few seconds.
 
 **macOS and Linux only.** The plugin runs standard POSIX tools: `mkdir`,
 `cp`, `ln`, `ls`, `dd` (with `/dev/null`), `git` for git context, `less` for the

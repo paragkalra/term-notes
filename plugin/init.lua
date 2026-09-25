@@ -620,7 +620,20 @@ local function release(pane, from_clipboard)
   end
 end
 
+-- Messages go to the right of the tab bar for a few seconds, because macOS
+-- often doesn't show notifications from the app you're using (or WezTerm
+-- never got notification permission). The notification is sent as well.
+local status_shown = 0
+
 local function toast(window, message)
+  status_shown = status_shown + 1
+  local this = status_shown
+  window:set_right_status(wezterm.format { { Text = ' term-notes: ' .. message .. ' ' } })
+  wezterm.time.call_after(4, function()
+    if status_shown == this then -- a newer message may be showing
+      window:set_right_status('')
+    end
+  end)
   window:toast_notification('term-notes', message, nil, 3000)
 end
 
