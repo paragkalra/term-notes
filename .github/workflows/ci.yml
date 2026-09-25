@@ -12,10 +12,14 @@ jobs:
       matrix:
         os: [macos-latest, ubuntu-latest]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+      # zsh for the shell snippet's tests (macOS already has it)
+      - if: runner.os == 'Linux'
+        run: sudo apt-get install -y --no-install-recommends zsh
       - run: pip install iterm2 pytest lupa ruff
       - run: ruff check .
+      - run: bash -n shell/term-notes.sh && zsh -n shell/term-notes.sh
       - run: pytest
