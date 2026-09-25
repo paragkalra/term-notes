@@ -48,11 +48,34 @@ function M.merge(defaults, overrides)
   return result
 end
 
+local PLACEHOLDERS = { title = true, dir = true, id = true }
+
+-- Same rules as the iTerm2 script's check_file_name: only {title}, {dir} and
+-- {id}, with {id} appended if missing.
+function M.check_file_name(template)
+  local unknown = {}
+  for name in template:gmatch('{([^{}]*)}') do
+    if not PLACEHOLDERS[name] then
+      unknown[#unknown + 1] = '{' .. name .. '}'
+    end
+  end
+  if #unknown > 0 then
+    table.sort(unknown)
+    error('term-notes: file_name ' .. template .. ' has unknown placeholder '
+      .. table.concat(unknown, ', ') .. '; use {title}, {dir} and {id}', 0)
+  end
+  if template:gsub('{[^{}]*}', ''):find('[{}]') then
+    error('term-notes: file_name ' .. template .. ' has an unmatched { or }', 0)
+  end
+  if not template:find('{id}', 1, true) then
+    template = template .. '_{id}'
+  end
+  return template
+end
+
 function M.settings(opts)
   local settings = M.merge(M.defaults, opts)
-  if not settings.file_name:find('{id}', 1, true) then
-    settings.file_name = settings.file_name .. '_{id}'
-  end
+  settings.file_name = M.check_file_name(settings.file_name)
   return settings
 end
 
@@ -92,15 +115,25 @@ function M.clean_lines(text)
   while #lines > 0 and lines[#lines] == '' do
     table.remove(lines)
   end
+  -- The whitespace prefix every line shares, character for character, so
+  -- mixed tabs and spaces are never cut into.
   local indent
   for _, line in ipairs(lines) do
     if line ~= '' then
-      local n = #line:match('^%s*')
-      indent = indent and math.min(indent, n) or n
+      local ws = line:match('^%s*')
+      if not indent then
+        indent = ws
+      else
+        local n = 0
+        while n < #indent and n < #ws and indent:byte(n + 1) == ws:byte(n + 1) do
+          n = n + 1
+        end
+        indent = indent:sub(1, n)
+      end
     end
   end
   for i, line in ipairs(lines) do
-    lines[i] = line:sub((indent or 0) + 1)
+    lines[i] = line:sub(#(indent or '') + 1)
   end
   return lines
 end
@@ -285,8 +318,28 @@ function M.notes_file(config, pane)
   local wanted = config.notes_dir .. '/' .. M.render_name(config.file_name, fields) .. '.md'
   local wildcard = M.render_name(config.file_name, { title = '*', dir = '*', id = id })
   local ok, existing = pcall(wezterm.glob, config.notes_dir .. '/' .. wildcard .. '.md')
-  if ok and existing[1] and existing[1] ~= wanted then
-    os.rename(existing[1], wanted)
+  if not ok or #existing == 0 then
+    return wanted
+  end
+  for _, path in ipairs(existing) do
+    if path == wanted then
+      return wanted
+    end
+  end
+  if #existing > 1 then
+    -- Ambiguous (e.g. after a template change): don't rename anything, keep
+    -- writing to the most recently used file.
+    local args = { 'ls', '-t' }
+    for _, path in ipairs(existing) do
+      args[#args + 1] = path
+    end
+    local newest = (run(args) or ''):match('[^\n]+') or existing[1]
+    wezterm.log_warn('term-notes: several notes files match this pane; using ' .. newest)
+    return newest
+  end
+  -- Never rename onto an existing file: that would silently replace it.
+  if file_exists(wanted) or not os.rename(existing[1], wanted) then
+    return existing[1]
   end
   return wanted
 end

@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import os
+import re
 import subprocess
 
 import iterm2
@@ -352,3 +353,72 @@ def test_concurrent_saves_cannot_duplicate_clipboard(tmp_path, monkeypatch):
     asyncio.run(two_quick_presses())
     [name] = os.listdir(tmp_path / "notes")
     assert (tmp_path / "notes" / name).read_text().count("> copied by the app") == 1
+
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("  line\n\tline", ["  line", "\tline"]),       # no shared prefix: untouched
+    ("\t a\n\t b\n\t\tc", [" a", " b", "\tc"]),  # only the shared "\t" goes
+    ("    a\n  b", ["  a", "b"]),
+])
+def test_clean_lines_mixed_indentation(text, expected):
+    assert th.clean_lines(text) == expected
+
+
+@pytest.mark.parametrize("template, message", [
+    ("{titel}_{id}", "{titel}"),
+    ("{title}_{0}", "{0}"),
+    ("{title", "invalid"),
+    ("title}", "invalid"),
+])
+def test_bad_file_name_template_is_rejected(tmp_path, template, message):
+    with pytest.raises(ValueError, match=re.escape(message)):
+        th.check_file_name(template)
+    path = tmp_path / "config.toml"
+    path.write_text(f"file_name = {template!r}\n".replace("'", '"'))
+    with pytest.raises(ValueError):
+        th.load_config(str(path))
+
+
+def test_good_file_name_templates():
+    assert th.check_file_name("{title}") == "{title}_{id}"
+    assert th.check_file_name("{dir}-{title}-{id}") == "{dir}-{title}-{id}"
+
+
+def test_rename_never_replaces_an_existing_file(tmp_path):
+    src, dst = tmp_path / "old.md", tmp_path / "new.md"
+    src.write_text("mine")
+    dst.write_text("someone else's")
+    assert th.rename_no_clobber(str(src), str(dst)) == str(src)
+    assert src.read_text() == "mine" and dst.read_text() == "someone else's"
+    dst.unlink()
+    assert th.rename_no_clobber(str(src), str(dst)) == str(dst)
+    assert dst.read_text() == "mine" and not src.exists()
+
+
+def test_ambiguous_matches_are_not_renamed(tmp_path):
+    older = tmp_path / "Old-title_934051cd.md"
+    newer = tmp_path / "Other-title_934051cd.md"
+    older.write_text("a")
+    newer.write_text("b")
+    os.utime(older, (1_000_000, 1_000_000))
+    path = th.notes_file_for(str(tmp_path), "{title}_{id}", SESSION, "Brand new", None)
+    assert path == str(newer)
+    assert sorted(os.listdir(tmp_path)) == [older.name, newer.name]  # nothing renamed or lost
+
+
+def test_failed_action_shows_an_alert(tmp_path, monkeypatch):
+    path = tmp_path / "config.toml"
+    path.write_text('file_name = "{titel}"\n')
+    real_load = th.load_config
+    monkeypatch.setattr(th, "load_config", lambda: real_load(str(path)))
+    alerts = []
+
+    class Notes(th.NoteTaker):
+        async def alert(self, session, title, message):
+            alerts.append((title, message))
+
+    asyncio.run(Notes(connection=None).perform("save", FakeSession(str(tmp_path))))
+    [(title, message)] = alerts
+    assert title == "term-notes: save failed"
+    assert "{titel}" in message

@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import stat
+import string
 import tempfile
 import tomllib
 
@@ -69,9 +70,28 @@ def load_config(path=CONFIG_PATH):
             else:
                 config[key] = value
     config["notes_dir"] = os.path.expanduser(config["notes_dir"])
-    if "{id}" not in config["file_name"]:
-        config["file_name"] += "_{id}"
+    config["file_name"] = check_file_name(config["file_name"])
     return config
+
+
+PLACEHOLDERS = ("title", "dir", "id")
+
+
+def check_file_name(template):
+    """Validate a file_name template; appends {id} if it is missing."""
+    try:
+        names = {name for _, name, _, _ in string.Formatter().parse(template) if name is not None}
+    except ValueError as e:  # unbalanced braces
+        raise ValueError(f"config: file_name {template!r} is invalid: {e}") from None
+    unknown = sorted(names - set(PLACEHOLDERS))
+    if unknown:
+        raise ValueError(
+            f"config: file_name {template!r} has unknown placeholder "
+            + ", ".join("{" + name + "}" for name in unknown)
+            + "; use {title}, {dir} and {id}")
+    if "{id}" not in template:
+        template += "_{id}"
+    return template
 
 
 def slug(text):
@@ -96,9 +116,31 @@ def notes_file_for(notes_dir, template, session_id, title, cwd):
     wanted = os.path.join(notes_dir, template.format(**fields) + ".md")
     wildcard = template.format(title="*", dir="*", id=fields["id"]) + ".md"
     existing = glob.glob(os.path.join(glob.escape(notes_dir), wildcard))
-    if existing and existing[0] != wanted:
-        os.rename(existing[0], wanted)
-    return wanted
+    if not existing or wanted in existing:
+        return wanted
+    if len(existing) > 1:
+        # Ambiguous (e.g. after a template change): don't rename anything,
+        # keep writing to the most recently used file.
+        newest = max(existing, key=os.path.getmtime)
+        log.warning("several notes files match this tab; using %s", newest)
+        return newest
+    return rename_no_clobber(existing[0], wanted)
+
+
+def rename_no_clobber(src, dst):
+    """Rename src to dst unless dst exists; returns the path now in use."""
+    try:
+        os.link(src, dst)  # fails if dst exists, unlike os.rename
+    except FileExistsError:
+        log.warning("not renaming %s: %s already exists", src, dst)
+        return src
+    except OSError:  # filesystem without hard links
+        if os.path.exists(dst):
+            return src
+        os.rename(src, dst)
+        return dst
+    os.remove(src)
+    return dst
 
 
 def clean_lines(text):
@@ -113,8 +155,11 @@ def clean_lines(text):
         lines.pop(0)
     while lines and not lines[-1]:
         lines.pop()
-    indent = min((len(line) - len(line.lstrip()) for line in lines if line), default=0)
-    return [line[indent:] for line in lines]
+    # The whitespace prefix every line shares, character for character, so
+    # mixed tabs and spaces are never cut into.
+    indent = os.path.commonprefix(
+        [line[:len(line) - len(line.lstrip())] for line in lines if line])
+    return [line[len(indent):] for line in lines]
 
 
 def abbreviate_home(path):
@@ -252,6 +297,8 @@ async def git_context(cwd):
 
 
 class NoteTaker:
+    ACTIONS = ("save", "save_with_comment", "open_notes", "undo")
+
     def __init__(self, connection):
         self.connection = connection
         # session id -> last clipboard text saved, so a stale clipboard
@@ -261,6 +308,29 @@ class NoteTaker:
         # and undos in a tab run one at a time, so two quick presses can't
         # both pass the clipboard check before either has saved.
         self.locks = collections.defaultdict(asyncio.Lock)
+
+    async def perform(self, name, session):
+        """Run an action, showing an alert if it fails.
+
+        The shortcut is swallowed by the keystroke filter, so without the
+        alert a failed save would look exactly like a successful one.
+        """
+        action = {
+            "save": lambda: self.save(session),
+            "save_with_comment": lambda: self.save(session, ask_comment=True),
+            "open_notes": lambda: self.open_notes(session),
+            "undo": lambda: self.undo(session),
+        }[name]
+        try:
+            await action()
+        except Exception as e:
+            log.exception("%s failed", name)
+            await self.alert(session, f"term-notes: {name.replace('_', ' ')} failed", str(e) or repr(e))
+
+    async def alert(self, session, title, message):
+        await iterm2.Alert(
+            title, message, session.window.window_id if session.window else None,
+        ).async_run(self.connection)
 
     async def selected_text(self, session):
         """Return (text, from_clipboard)."""
@@ -336,10 +406,7 @@ class NoteTaker:
         config = load_config()
         notes_file = await self.notes_file(session, config)
         if not os.path.exists(notes_file):
-            await iterm2.Alert(
-                "No notes yet", "Select some text in this tab and save it first.",
-                session.window.window_id if session.window else None,
-            ).async_run(self.connection)
+            await self.alert(session, "No notes yet", "Select some text in this tab and save it first.")
             return
         if config["open_in"] == "app":
             await run("/usr/bin/open", notes_file)
@@ -363,21 +430,12 @@ def keystroke_patterns(bindings):
 async def main(connection):
     app = await iterm2.async_get_app(connection)
     notes = NoteTaker(connection)
-    actions = {
-        "save": lambda s: notes.save(s),
-        "save_with_comment": lambda s: notes.save(s, ask_comment=True),
-        "open_notes": notes.open_notes,
-        "undo": notes.undo,
-    }
+    actions = NoteTaker.ACTIONS
 
     async def dispatch(name, session_id):
         session = app.get_session_by_id(session_id)
-        if session is None:
-            return
-        try:
-            await actions[name](session)
-        except Exception:
-            log.exception("%s failed", name)
+        if session is not None:
+            await notes.perform(name, session)
 
     # Script functions, for anyone who prefers binding keys in iTerm2 itself
     # (Settings > Keys > Key Bindings > Invoke Script Function), e.g.

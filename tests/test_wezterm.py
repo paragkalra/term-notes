@@ -1,5 +1,6 @@
 import datetime
 import os
+import re
 import subprocess
 
 import pytest
@@ -91,6 +92,9 @@ def test_without_last_note(wez):
     "  a  \r\n\n  \nb\n",
     "\n  \n  ⏺ The fix\n\n     indented more\n  back\n\n",
     "    def f(x):\n        return 1\n\n    f(2)\n",
+    "  line\n\tline",
+    "\t a\n\t b\n\t\tc",
+    " \tx\n  y",
     "\n  \n",
     "",
 ])
@@ -399,3 +403,33 @@ def test_windows_adds_no_shortcuts(wez):
     plugin.apply_to_config(config, None)
     assert len(config["keys"]) == 0
     assert "Windows is not supported" in stub.errors[1]
+
+
+
+@pytest.mark.parametrize("template, message", [
+    ("{titel}_{id}", "{titel}"),
+    ("{title}_{0}", "{0}"),
+    ("{title", "unmatched"),
+    ("title}", "unmatched"),
+])
+def test_bad_file_name_template_is_rejected(wez, template, message):
+    lua, plugin, _, _ = wez
+    with pytest.raises(Exception, match=re.escape(message)):
+        plugin.settings(lua.table_from({"file_name": template}))
+
+
+def test_ambiguous_matches_are_not_renamed(wez, tmp_path):
+    lua, plugin, _, _ = wez
+    actions = plugin.actions(settings_for(lua, plugin, tmp_path))
+    window, pane, state = make_pane(lua, title="First", selection="a")
+    call(actions.save, window, pane)
+    [first] = os.listdir(tmp_path)
+    suffix = first.split("_")[-1]
+    older = tmp_path / ("Stray_" + suffix)
+    older.write_text("stray")
+    os.utime(older, (1_000_000, 1_000_000))
+    state.title, state.selection = "Renamed", "b"
+    call(actions.save, window, pane)
+    assert sorted(os.listdir(tmp_path)) == sorted([first, older.name])  # nothing renamed or lost
+    assert "> b" in (tmp_path / first).read_text()  # written to the newest match
+    assert older.read_text() == "stray"
