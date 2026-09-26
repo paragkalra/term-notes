@@ -1050,4 +1050,4 @@ def test_messages_in_two_windows_are_both_cleared(wez, tmp_path):
     stub.timers[1]()
     stub.timers[2]()
     assert sa.status == "" and sb.status == ""  # neither window stuck
-    assert list(stub.emitted.values()) == ["update-right-status", "update-right-status"]
+    assert list(stub.emitted.values()) == ["update-status", "update-right-status"] * 2

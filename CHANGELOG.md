@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.2
+
+- The shell snippet works inside GNU Screen: its values are wrapped in
+  Screen's pass-through string so they reach the terminal (0.3.1 trusted
+  Screen but the values didn't get through).
+- WezTerm: after a message clears, both `update-status` (current) and
+  `update-right-status` (older configs) are emitted, so either kind of
+  status handler redraws right away.
+
 ## 0.3.1
 
 - SSH git context now works when the terminal runs tmux, screen or zellij

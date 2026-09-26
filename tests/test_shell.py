@@ -91,3 +91,19 @@ def test_keeps_the_last_commands_exit_status(shell, tmp_path):
     out = subprocess.run([shell, "-c", script], capture_output=True, text=True,
                          env={"PATH": os.environ["PATH"], "HOME": str(tmp_path)}).stdout
     assert out.strip() == "status=1"
+
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_gnu_screen_passthrough(shell, tmp_path):
+    out = publish(shell, tmp_path, tmp_path, env={"STY": "12345.pts-0.host"})
+    assert out.startswith("\x1bP\x1b]1337;SetUserVar=term_notes_host=")
+    assert out.count("\x1bP") == 4 and out.count("\x1b\\") == 4
+    # The wrapped sequences still carry the values.
+    assert user_vars(out)["term_notes_dir"] == "~"
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_tmux_inside_screen_uses_tmux_passthrough(shell, tmp_path):
+    out = publish(shell, tmp_path, tmp_path, env={"STY": "1.x", "TMUX": "/tmp/t,1,0"})
+    assert out.startswith("\x1bPtmux;")

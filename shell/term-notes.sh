@@ -11,6 +11,7 @@
 # It sets terminal "user variables" with the OSC 1337 SetUserVar escape
 # sequence, which both iTerm2 and WezTerm understand. Inside tmux, enable
 # passthrough so they reach the terminal: set -g allow-passthrough on
+# Inside GNU Screen they are wrapped in Screen's pass-through (DCS) string.
 
 __term_notes_set() {
   # OSC 1337 ; SetUserVar=<name>=<base64 value> BEL
@@ -18,6 +19,9 @@ __term_notes_set() {
   value=$(printf '%s' "$2" | base64 | tr -d '\n')
   if [ -n "$TMUX" ]; then
     printf '\033Ptmux;\033\033]1337;SetUserVar=%s=%s\007\033\\' "$1" "$value"
+  elif [ -n "$STY" ]; then
+    # GNU Screen passes a DCS string's contents through to the terminal.
+    printf '\033P\033]1337;SetUserVar=%s=%s\007\033\\' "$1" "$value"
   else
     printf '\033]1337;SetUserVar=%s=%s\007' "$1" "$value"
   fi

@@ -711,9 +711,11 @@ local function toast(window, message)
     end
     status_shown[id] = nil
     window:set_right_status('')
-    -- Give a config's own right status (the update-right-status event) a
-    -- chance to draw itself again right away.
-    pcall(wezterm.emit, 'update-right-status', window, window:active_pane())
+    -- Give a config's own status a chance to draw itself again right away:
+    -- update-status, and update-right-status for older configs.
+    for _, event in ipairs { 'update-status', 'update-right-status' } do
+      pcall(wezterm.emit, event, window, window:active_pane())
+    end
   end)
   window:toast_notification('term-notes', message, nil, 3000)
 end
