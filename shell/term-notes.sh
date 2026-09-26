@@ -24,6 +24,9 @@ __term_notes_set() {
 }
 
 __term_notes_publish() {
+  # Returned at the end, so prompt hooks after this one still see the last
+  # command's exit status. (Not "status": that's read-only in zsh.)
+  local last_status=$?
   local dir="$PWD" top repo="" branch=""
   case "$dir" in
     "$HOME") dir="~" ;;
@@ -38,6 +41,7 @@ __term_notes_publish() {
   __term_notes_set term_notes_dir "$dir"
   __term_notes_set term_notes_repo "$repo"
   __term_notes_set term_notes_branch "$branch"
+  return "$last_status"
 }
 
 if [ -n "$ZSH_VERSION" ]; then

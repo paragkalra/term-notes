@@ -29,7 +29,7 @@ import tomllib
 
 import iterm2
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 CONFIG_PATH = os.path.expanduser(
     os.environ.get("TERM_NOTES_CONFIG", "~/.config/term-notes/config.toml"))
@@ -132,6 +132,19 @@ def file_title(title, cwd):
     if name.lower() in GENERIC_TITLES and cwd:
         return slug(os.path.basename(cwd.rstrip("/")))
     return name
+
+
+def pre_03_notes_file(notes_dir, template, session_id, title, cwd):
+    """Before 0.3, a tab titled just "zsh" saved to zsh.md. If this tab's
+    title is such a shell name, return that older file if it exists, so its
+    notes can still be opened. (They aren't moved: zsh.md can hold notes
+    from many directories.)"""
+    if file_title(title, cwd) == slug(title):
+        return None
+    fields = {"title": slug(title), "dir": slug(os.path.basename(cwd or "")),
+              "id": short_id(session_id)}
+    path = os.path.join(notes_dir, render_name(template, fields) + ".md")
+    return path if os.path.exists(path) else None
 
 
 def short_id(session_id):
@@ -494,7 +507,10 @@ async def run(*args, timeout=2):
 # notes from SSH sessions can record the remote directory and git branch.
 REMOTE_VARS = ("host", "dir", "repo", "branch")
 # Foreground programs that mean "this tab is on another machine".
-REMOTE_JOBS = {"ssh", "mosh", "mosh-client", "et", "autossh", "tsh", "gcloud", "aws"}
+REMOTE_JOBS = {"ssh", "mosh", "mosh-client", "et", "autossh", "tsh", "gcloud", "aws",
+               # Multiplexers: the terminal can't see what runs inside them
+               # (often ssh), so their values are trusted too.
+               "tmux", "screen", "zellij"}
 
 
 def local_hostname():
@@ -731,8 +747,11 @@ class NoteTaker:
 
     async def open_notes(self, session):
         config = load_config()
-        notes_file = await self.locked(locked_notes_file, session, config, await self.context(session))
+        context = await self.context(session)
+        notes_file = await self.locked(locked_notes_file, session, config, context)
         if not os.path.exists(notes_file):
+            notes_file = await self.locked(pre_03_notes_file, session, config, context)
+        if not notes_file:
             await self.alert(session, "No notes yet", "Select some text in this tab and save it first.")
             return
         if config["open_in"] == "app":

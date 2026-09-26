@@ -46,6 +46,8 @@ def make_pane(lua, *, pane_id=1, tab_title="", title="zsh", cwd="/tmp", selectio
             get_selection_text_for_pane = function() return state.selection end,
             toast_notification = function(_, _, msg) table.insert(state.toasts, msg) end,
             set_right_status = function(_, text) state.status = text end,
+            window_id = function() return state.window_id or 1 end,
+            active_pane = function() return pane end,
             perform_action = function(self, action, p) state.prompt = action end,
           }
           return window, pane, state
@@ -1012,3 +1014,40 @@ def test_unnamed_pane_gets_a_directory_named_file(wez, tmp_path):
     window, pane, _ = make_pane(lua, title="zsh", cwd="/Users/me/platform", selection="x")
     call(actions.save, window, pane)
     assert listdir(tmp_path) == ["platform.md"]
+
+
+
+def test_ssh_inside_tmux_pane_records_remote_place(wez, tmp_path):
+    lua, plugin, _, _ = wez
+    actions = plugin.actions(plugin.settings(lua.table_from({"notes_dir": str(tmp_path)})))
+    window, pane, _ = make_pane(lua, title="tmux", cwd="/Users/me", selection="x")
+    returning = lua.eval("function(t) return function() return t end end")
+    pane.get_user_vars = returning(lua.table_from(REMOTE_VARS))
+    pane.get_foreground_process_name = lua.eval("function() return '/opt/homebrew/bin/tmux' end")
+    call(actions.save, window, pane)
+    [name] = listdir(tmp_path)
+    assert "`pkbox:~/proj` · `proj` @ `feat/x`" in (tmp_path / name).read_text()
+
+
+def test_open_notes_finds_pre_03_shell_named_file(wez, tmp_path):
+    lua, plugin, _, _ = wez
+    (tmp_path / "zsh.md").write_text("## saved by 0.2\n\n")
+    actions = plugin.actions(plugin.settings(lua.table_from({"notes_dir": str(tmp_path)})))
+    window, pane, state = make_pane(lua, title="zsh", cwd="/Users/me/platform", selection="")
+    call(actions.open_notes, window, pane)
+    [split] = state.splits.values()
+    assert list(split.args.values())[-1] == str(tmp_path / "zsh.md")
+
+
+def test_messages_in_two_windows_are_both_cleared(wez, tmp_path):
+    lua, plugin, stub, _ = wez
+    actions = plugin.actions(settings_for(lua, plugin, tmp_path))
+    wa, pa, sa = make_pane(lua, pane_id=1, selection="")
+    wb, pb, sb = make_pane(lua, pane_id=2, selection="")
+    sa.window_id, sb.window_id = 1, 2
+    call(actions.undo, wa, pa)  # "No notes to undo" in window A
+    call(actions.undo, wb, pb)  # ... and in window B
+    stub.timers[1]()
+    stub.timers[2]()
+    assert sa.status == "" and sb.status == ""  # neither window stuck
+    assert list(stub.emitted.values()) == ["update-right-status", "update-right-status"]

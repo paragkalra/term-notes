@@ -32,7 +32,9 @@ terminal: shells, SSH sessions, REPLs, log tails.
   the same file. Agents like Claude Code set the title to the current task,
   so file names describe what you were doing. A tab whose title is just a
   shell name (`zsh`, `bash`, `ssh`...) uses its directory's name instead, so
-  unnamed tabs don't all share `zsh.md`. Prefer one file per tab that
+  unnamed tabs don't all share `zsh.md`. (Notes saved there before 0.3 stay
+  in `zsh.md`, since it can mix several directories; <kbd>⌃⌥N</kbd> opens it
+  until the tab has a new file.) Prefer one file per tab that
   follows title changes? Set `file_name = "{title}_{id}"`.
 
   **Upgrading from 0.1**, whose default was one file per tab
@@ -131,8 +133,11 @@ ssh pkbox 'echo "source ~/.term-notes.sh" >> ~/.zshrc'   # or ~/.bashrc
 Source it on your Mac too: the values stay set after you log out of the
 remote host, and a local prompt replaces them. (term-notes ignores another
 host's values unless `ssh` or `mosh` is in the foreground, so notes stay
-right even without that.) It works in both iTerm2 and WezTerm; inside tmux,
-add `set -g allow-passthrough on` to `~/.tmux.conf`. Values are updated at
+right even without that. When tmux or screen is in the foreground, the
+terminal can't see whether ssh runs inside it, so the values are trusted;
+sourcing the snippet on your Mac keeps them current there.) It works in
+both iTerm2 and WezTerm; inside tmux, add `set -g allow-passthrough on` to
+`~/.tmux.conf`. Values are updated at
 each prompt, so inside a long-running program like Claude Code they
 describe where you started it.
 

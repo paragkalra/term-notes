@@ -66,6 +66,8 @@ def load_wezterm_plugin(home="/Users/me"):
           }
           function stub.action_callback(fn) return { callback = fn } end
           stub.timers = {}
+          stub.emitted = {}
+          function stub.emit(name, ...) table.insert(stub.emitted, name) end
           stub.time = { call_after = function(_, fn) table.insert(stub.timers, fn) end }
           function stub.format(items)
             local out = {}

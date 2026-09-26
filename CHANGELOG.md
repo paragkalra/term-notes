@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.1
+
+- SSH git context now works when the terminal runs tmux, screen or zellij
+  (with ssh inside it), not only when ssh itself is in the foreground.
+- ⌃⌥N in a shell-named tab opens its pre-0.3 `zsh.md`/`bash.md` notes when
+  the tab has no directory-named file yet. Those notes aren't moved, since
+  one `zsh.md` can mix several directories.
+- The shell snippet keeps the previous command's exit status, so prompt
+  hooks that run after it (and `$?` in the prompt) see the real value.
+- WezTerm: tab-bar messages are tracked per window, so a message in one
+  window no longer leaves another window's message stuck; after a message,
+  a config's own `update-right-status` handler is asked to redraw.
+
 ## 0.3.0
 
 - **Git context over SSH.** Source `shell/term-notes.sh` on the machines you

@@ -81,3 +81,13 @@ def test_bash_adds_itself_to_prompt_command_once():
                           f'source "{SNIPPET}"; printf %s "$PROMPT_COMMAND"'],
                          capture_output=True, text=True, check=True).stdout
     assert out == "__term_notes_publish;history -a"
+
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_keeps_the_last_commands_exit_status(shell, tmp_path):
+    # Prompt hooks that run after this one must still see the real $?.
+    script = f'source "{SNIPPET}"; false; __term_notes_publish >/dev/null; echo "status=$?"'
+    out = subprocess.run([shell, "-c", script], capture_output=True, text=True,
+                         env={"PATH": os.environ["PATH"], "HOME": str(tmp_path)}).stdout
+    assert out.strip() == "status=1"

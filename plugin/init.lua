@@ -126,7 +126,27 @@ end
 local REMOTE_JOBS = {
   ssh = true, mosh = true, ['mosh-client'] = true, et = true, autossh = true,
   tsh = true, gcloud = true, aws = true,
+  -- Multiplexers: the terminal can't see what runs inside them (often ssh),
+  -- so their values are trusted too.
+  tmux = true, screen = true, zellij = true,
 }
+
+-- Same as the iTerm2 script's pre_03_notes_file: before 0.3, a pane titled
+-- just "zsh" saved to zsh.md; return that file (if it exists) so its notes
+-- can still be opened. They aren't moved: it can hold several directories'.
+function M.pre_03_notes_file(config, title, cwd, id)
+  if M.file_title(title, cwd) == M.slug(title) then
+    return nil
+  end
+  local fields = { title = M.slug(title), dir = M.slug(M.basename(cwd)), id = id }
+  local path = config.notes_dir .. '/' .. M.render_name(config.file_name, fields) .. '.md'
+  local f = io.open(path, 'r')
+  if not f then
+    return nil
+  end
+  f:close()
+  return path
+end
 
 function M.remote_place(user_vars, job, local_host)
   local host = (user_vars.term_notes_host or ''):match('^%s*(.-)%s*$')
@@ -676,16 +696,24 @@ end
 -- Messages go to the right of the tab bar for a few seconds, because macOS
 -- often doesn't show notifications from the app you're using (or WezTerm
 -- never got notification permission). The notification is sent as well.
-local status_shown = 0
+-- window id -> number of the message it shows, so an older message's timer
+-- doesn't clear a newer one (and one window's messages don't affect another's).
+local status_shown = {}
 
 local function toast(window, message)
-  status_shown = status_shown + 1
-  local this = status_shown
+  local id = window:window_id()
+  local this = (status_shown[id] or 0) + 1
+  status_shown[id] = this
   window:set_right_status(wezterm.format { { Text = ' term-notes: ' .. message .. ' ' } })
   wezterm.time.call_after(4, function()
-    if status_shown == this then -- a newer message may be showing
-      window:set_right_status('')
+    if status_shown[id] ~= this then
+      return -- a newer message is showing
     end
+    status_shown[id] = nil
+    window:set_right_status('')
+    -- Give a config's own right status (the update-right-status event) a
+    -- chance to draw itself again right away.
+    pcall(wezterm.emit, 'update-right-status', window, window:active_pane())
   end)
   window:toast_notification('term-notes', message, nil, 3000)
 end
@@ -809,11 +837,15 @@ function M.actions(config)
 
   actions.open_notes = wezterm.action_callback(function(window, pane)
     -- Looking the file up can rename or merge files, so it takes the guard.
-    local notes_file = exclusive(window, M.notes_file, config, pane)
+    local context = pane_context(pane)
+    local notes_file = exclusive(window, M.notes_file, config, pane, context)
     if not notes_file then
       return
     end
     if not file_exists(notes_file) then
+      notes_file = M.pre_03_notes_file(config, context.title, context.cwd, pane_key(pane))
+    end
+    if not notes_file then
       toast(window, 'No notes yet for this tab')
       return
     end

@@ -1075,3 +1075,58 @@ def test_stale_remote_vars_fall_back_to_local(tmp_path, monkeypatch):
     [name] = listdir(tmp_path / "notes")
     assert "pkbox" not in (tmp_path / "notes" / name).read_text()
     assert "git" in calls  # looked up locally instead
+
+
+
+@pytest.mark.parametrize("job", ["tmux", "screen", "zellij"])
+def test_remote_vars_are_trusted_under_a_multiplexer(job):
+    # The terminal sees tmux in the foreground even when ssh runs inside it.
+    assert th.remote_place(REMOTE, job, "My-Mac") == ("pkbox:~/proj", ("proj", "feat/x"))
+
+
+def test_note_from_ssh_inside_tmux_records_remote_place(tmp_path, monkeypatch):
+    async def fake_run(*args, timeout=2):
+        return "copied\n" if args[0] == "/usr/bin/pbpaste" else None
+
+    config = th.load_config(str(tmp_path / "missing.toml"))
+    config["notes_dir"] = str(tmp_path / "notes")
+    monkeypatch.setattr(th, "run", fake_run)
+    monkeypatch.setattr(th, "load_config", lambda: config)
+
+    class TmuxTab(FakeSession):
+        user_vars: typing.ClassVar[dict] = REMOTE
+        job = "tmux"
+
+    asyncio.run(th.NoteTaker(connection=None).save(TmuxTab("/Users/me")))
+    [name] = listdir(tmp_path / "notes")
+    assert "`pkbox:~/proj` · `proj` @ `feat/x`" in (tmp_path / "notes" / name).read_text()
+
+
+def test_open_notes_finds_pre_03_shell_named_file(tmp_path, monkeypatch):
+    opened = []
+
+    async def fake_run(*args, timeout=2):
+        opened.append(args)
+        return ""
+
+    config = th.load_config(str(tmp_path / "missing.toml"))
+    config["notes_dir"] = str(tmp_path)
+    config["open_in"] = "app"
+    monkeypatch.setattr(th, "run", fake_run)
+    monkeypatch.setattr(th, "load_config", lambda: config)
+    (tmp_path / "zsh.md").write_text("## saved by 0.2\n\n")
+
+    class Unnamed(FakeSession):
+        def __init__(self, cwd):
+            super().__init__(cwd)
+
+            class Tab:
+                async def async_get_variable(self, name):
+                    return "zsh"
+
+            self.tab = Tab()
+
+    asyncio.run(th.NoteTaker(connection=None).open_notes(Unnamed("/Users/me/platform")))
+    assert opened == [("/usr/bin/open", str(tmp_path / "zsh.md"))]
+    # A new note from that tab goes to the directory-named file.
+    assert th.pre_03_notes_file(str(tmp_path), "{title}", SESSION, "Claude", "/x") is None
