@@ -126,9 +126,10 @@ end
 local REMOTE_JOBS = {
   ssh = true, mosh = true, ['mosh-client'] = true, et = true, autossh = true,
   tsh = true, gcloud = true, aws = true,
-  -- Multiplexers: the terminal can't see what runs inside them (often ssh),
-  -- so their values are trusted too.
-  tmux = true, screen = true, zellij = true,
+  -- Multiplexers the snippet can publish through: the terminal can't see
+  -- what runs inside them (often ssh), so their values are trusted too.
+  -- (Not zellij: it drops OSC 1337.)
+  tmux = true, screen = true,
 }
 
 -- Same as the iTerm2 script's pre_03_notes_file: before 0.3, a pane titled

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.3
+
+- Correction to 0.3.1: SSH git context does **not** work inside zellij,
+  which drops the escape sequences the snippet uses. Its values are no
+  longer trusted, so stale ones can't end up in notes.
+- tmux and GNU Screen nested inside each other are documented as
+  unsupported: the environment can't tell which runs inside which, and each
+  order needs different wrapping.
+
 ## 0.3.2
 
 - The shell snippet works inside GNU Screen: its values are wrapped in

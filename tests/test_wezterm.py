@@ -983,6 +983,7 @@ REMOTE_VARS = {"term_notes_host": "pkbox", "term_notes_dir": "~/proj",
     ({**REMOTE_VARS, "term_notes_host": "my-mac"}, "zsh"),
     ({**REMOTE_VARS, "term_notes_repo": "", "term_notes_branch": ""}, "ssh"),
     ({**REMOTE_VARS, "term_notes_branch": ""}, "ssh"), ({}, "ssh"),
+    (REMOTE_VARS, "tmux"), (REMOTE_VARS, "screen"), (REMOTE_VARS, "zellij"),
 ])
 def test_remote_place_matches_python(wez, user_vars, job):
     lua, plugin, _, _ = wez

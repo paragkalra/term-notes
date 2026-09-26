@@ -104,6 +104,9 @@ def test_gnu_screen_passthrough(shell, tmp_path):
 
 
 @pytest.mark.parametrize("shell", SHELLS)
-def test_tmux_inside_screen_uses_tmux_passthrough(shell, tmp_path):
+def test_nested_multiplexers_get_tmux_wrapping_only(shell, tmp_path):
+    # Documented as unsupported: with both set, the environment can't tell
+    # which is inside which, so only tmux's wrapping is used (right when tmux
+    # is the inner one, but Screen won't forward it further).
     out = publish(shell, tmp_path, tmp_path, env={"STY": "1.x", "TMUX": "/tmp/t,1,0"})
-    assert out.startswith("\x1bPtmux;")
+    assert out.count("\x1bPtmux;") == 4 and "\x1bP\x1b]" not in out

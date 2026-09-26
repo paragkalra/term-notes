@@ -1078,10 +1078,15 @@ def test_stale_remote_vars_fall_back_to_local(tmp_path, monkeypatch):
 
 
 
-@pytest.mark.parametrize("job", ["tmux", "screen", "zellij"])
+@pytest.mark.parametrize("job", ["tmux", "screen"])
 def test_remote_vars_are_trusted_under_a_multiplexer(job):
     # The terminal sees tmux in the foreground even when ssh runs inside it.
     assert th.remote_place(REMOTE, job, "My-Mac") == ("pkbox:~/proj", ("proj", "feat/x"))
+
+
+def test_remote_vars_are_not_trusted_under_zellij():
+    # zellij drops OSC 1337, so its values can only be stale ones.
+    assert th.remote_place(REMOTE, "zellij", "My-Mac") is None
 
 
 def test_note_from_ssh_inside_tmux_records_remote_place(tmp_path, monkeypatch):

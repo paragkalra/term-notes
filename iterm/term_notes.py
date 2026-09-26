@@ -29,7 +29,7 @@ import tomllib
 
 import iterm2
 
-__version__ = "0.3.2"
+__version__ = "0.3.3"
 
 CONFIG_PATH = os.path.expanduser(
     os.environ.get("TERM_NOTES_CONFIG", "~/.config/term-notes/config.toml"))
@@ -508,9 +508,10 @@ async def run(*args, timeout=2):
 REMOTE_VARS = ("host", "dir", "repo", "branch")
 # Foreground programs that mean "this tab is on another machine".
 REMOTE_JOBS = {"ssh", "mosh", "mosh-client", "et", "autossh", "tsh", "gcloud", "aws",
-               # Multiplexers: the terminal can't see what runs inside them
-               # (often ssh), so their values are trusted too.
-               "tmux", "screen", "zellij"}
+               # Multiplexers the snippet can publish through: the terminal
+               # can't see what runs inside them (often ssh), so their values
+               # are trusted too. (Not zellij: it drops OSC 1337.)
+               "tmux", "screen"}
 
 
 def local_hostname():

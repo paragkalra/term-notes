@@ -12,6 +12,9 @@
 # sequence, which both iTerm2 and WezTerm understand. Inside tmux, enable
 # passthrough so they reach the terminal: set -g allow-passthrough on
 # Inside GNU Screen they are wrapped in Screen's pass-through (DCS) string.
+# Not supported: zellij (it drops OSC 1337), and tmux and Screen nested in
+# each other (the environment can't tell which is inside which, and each
+# order needs different wrapping; tmux's is used).
 
 __term_notes_set() {
   # OSC 1337 ; SetUserVar=<name>=<base64 value> BEL

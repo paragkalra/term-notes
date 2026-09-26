@@ -137,7 +137,8 @@ right even without that. When tmux or screen is in the foreground, the
 terminal can't see whether ssh runs inside it, so the values are trusted;
 sourcing the snippet on your Mac keeps them current there.) It works in
 both iTerm2 and WezTerm; inside tmux, add `set -g allow-passthrough on` to
-`~/.tmux.conf` (GNU Screen needs no setup). Values are updated at
+`~/.tmux.conf` (GNU Screen needs no setup). Not supported: zellij, which
+doesn't pass these values on, and tmux and Screen nested inside each other. Values are updated at
 each prompt, so inside a long-running program like Claude Code they
 describe where you started it.
 
