@@ -166,8 +166,9 @@ restart (**Scripts → Manage → Console**, then restart).
 - **Follow along:** <kbd>⌃⌥N</kbd> opens the notes in `less`. Press
   <kbd>F</kbd> to follow new notes as you save them, and <kbd>q</kbd> to close
   the pane.
-- **Selecting in agent TUIs:** hold <kbd>⌥</kbd> while dragging to make
-  iTerm2 do the selecting instead of the app. Both work.
+- **Selecting in agent TUIs:** hold <kbd>⌥</kbd> (iTerm2) or <kbd>⇧</kbd>
+  (WezTerm) while dragging to make the terminal do the selecting instead of
+  the app. Both work.
 - **Search everything:** `rg -i "cookie" ~/notes/term-notes`.
 
 ## Concurrency
@@ -187,8 +188,12 @@ when you aren't saving, or copy them elsewhere first.
 ## Limitations
 
 - In apps that capture the mouse without copying to the clipboard (vim with
-  `mouse=a`, tmux mouse mode), <kbd>⌥</kbd>-drag so the terminal makes the
-  selection.
+  `mouse=a`, tmux mouse mode), hold <kbd>⌥</kbd> (iTerm2) or <kbd>⇧</kbd>
+  (WezTerm) while dragging so the terminal makes the selection. Otherwise
+  the terminal has no selection, the clipboard has nothing new, and
+  term-notes says "Nothing selected". In tmux you can also copy the
+  selection first (for example `y` in copy mode with a `copy-pipe` binding),
+  then press the shortcut.
 - If you press the shortcut without selecting anything in such an app,
   whatever you last copied is saved, once per pane. <kbd>⌃⌥Z</kbd> undoes it.
 - In SSH sessions without the [shell snippet](#ssh-sessions), `{dir}` and
